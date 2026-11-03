@@ -39,3 +39,25 @@ export const PERMISSION_CATALOG = [
   'audit_logs.view',
   'dashboard.view',
 ];
+
+export const ORGANIZATION_ADMIN_ROLE_NAME = 'Organization Admin';
+
+/**
+ * Organization Admin receives existing catalog permissions only.
+ * Platform organization-management remains Super Admin via platformRole,
+ * not permission codes (no organizations.* codes exist in the catalog).
+ */
+export const ORGANIZATION_ADMIN_PERMISSIONS = [...PERMISSION_CATALOG];
+
+export const AUDIT_ACTIONS = {
+  ORGANIZATION_CREATED: 'ORGANIZATION_CREATED',
+  ORGANIZATION_UPDATED: 'ORGANIZATION_UPDATED',
+  ORGANIZATION_ACTIVATED: 'ORGANIZATION_ACTIVATED',
+  ORGANIZATION_DEACTIVATED: 'ORGANIZATION_DEACTIVATED',
+  ORGANIZATION_ADMIN_CREATED: 'ORGANIZATION_ADMIN_CREATED',
+};
+
+export const AUDIT_RESOURCE_TYPES = {
+  ORGANIZATION: 'Organization',
+  USER: 'User',
+};

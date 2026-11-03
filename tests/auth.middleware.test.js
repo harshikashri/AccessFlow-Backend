@@ -14,6 +14,7 @@ import {
   resetTestDatabase,
   Session,
 } from './helpers.js';
+import Organization from '../src/models/Organization.js';
 
 const authHeader = (token) => ({ Authorization: `Bearer ${token}` });
 
@@ -124,6 +125,11 @@ describe('Authentication middleware', () => {
     const user = await createUser({
       email: 'org-user@example.com',
       organizationMemberships: [{ organizationId: orgId, status: 'ACTIVE' }],
+    });
+    await Organization.create({
+      _id: orgId,
+      name: 'Middleware Organization',
+      createdBy: user._id,
     });
 
     const login = await loginRequest({

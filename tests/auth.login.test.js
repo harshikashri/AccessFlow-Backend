@@ -13,6 +13,7 @@ import {
   resetTestDatabase,
   Session,
 } from './helpers.js';
+import Organization from '../src/models/Organization.js';
 import { hashToken } from '../src/utils/token.js';
 
 describe('Auth login', () => {
@@ -103,13 +104,17 @@ describe('Auth login', () => {
     const orgA = new mongoose.Types.ObjectId();
     const orgB = new mongoose.Types.ObjectId();
 
-    await createUser({
+    const user = await createUser({
       email: 'multi@example.com',
       organizationMemberships: [
         { organizationId: orgA, status: 'ACTIVE' },
         { organizationId: orgB, status: 'ACTIVE' },
       ],
     });
+    await Organization.create([
+      { _id: orgA, name: 'Multi Org A', createdBy: user._id },
+      { _id: orgB, name: 'Multi Org B', createdBy: user._id },
+    ]);
 
     const missingOrg = await loginRequest({
       email: 'multi@example.com',

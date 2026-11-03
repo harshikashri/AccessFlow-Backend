@@ -1,5 +1,6 @@
 import User from '../../models/User.js';
 import Session from '../../models/Session.js';
+import Organization from '../../models/Organization.js';
 import { AppError } from '../../utils/AppError.js';
 import { verifyPassword } from '../../utils/password.js';
 import {
@@ -77,7 +78,7 @@ const assertSessionActive = (session) => {
   }
 };
 
-const assertOrganizationContextForUser = (user, organizationId) => {
+const assertOrganizationContextForUser = async (user, organizationId) => {
   if (isSuperAdmin(user)) {
     if (organizationId) {
       throw new AppError(
@@ -99,6 +100,18 @@ const assertOrganizationContextForUser = (user, organizationId) => {
       'Active organization membership is required for this session.',
       401,
       'INVALID_ORGANIZATION_CONTEXT'
+    );
+  }
+
+  const organization = await Organization.findById(organizationId).select('status');
+  if (!organization) {
+    throw new AppError('Organization context is invalid.', 401, 'INVALID_ORGANIZATION_CONTEXT');
+  }
+  if (organization.status !== 'ACTIVE') {
+    throw new AppError(
+      'This organization is inactive.',
+      403,
+      'ORGANIZATION_INACTIVE'
     );
   }
 };
@@ -133,7 +146,7 @@ export const login = async ({ email, password, organizationId }) => {
   assertUserActive(user);
 
   const resolvedOrganizationId = resolveOrganizationContext(user, organizationId);
-  assertOrganizationContextForUser(user, resolvedOrganizationId);
+  await assertOrganizationContextForUser(user, resolvedOrganizationId);
 
   const refreshToken = generateRefreshToken();
   const refreshTokenHash = hashToken(refreshToken);
@@ -184,7 +197,7 @@ export const refresh = async (rawRefreshToken) => {
     throw new AppError('Account is inactive.', 403, 'ACCOUNT_INACTIVE');
   }
 
-  assertOrganizationContextForUser(user, existingSession.organizationId);
+  await assertOrganizationContextForUser(user, existingSession.organizationId);
 
   const nextRefreshToken = generateRefreshToken();
   const nextRefreshTokenHash = hashToken(nextRefreshToken);
@@ -270,7 +283,7 @@ export const getCurrentUser = async ({ userId, sessionId }) => {
     throw new AppError('Session does not belong to this user.', 401, 'SESSION_MISMATCH');
   }
 
-  assertOrganizationContextForUser(user, session.organizationId);
+  await assertOrganizationContextForUser(user, session.organizationId);
 
   return {
     user: toPublicUser(user, session.organizationId),
@@ -299,7 +312,7 @@ export const loadAuthContext = async ({ userId, sessionId, organizationId, platf
     throw new AppError('Token platform role is invalid.', 401, 'INVALID_PLATFORM_ROLE');
   }
 
-  assertOrganizationContextForUser(user, session.organizationId);
+  await assertOrganizationContextForUser(user, session.organizationId);
 
   return {
     user,
