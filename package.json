@@ -6,11 +6,23 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "seed:super-admin": "node scripts/seed-super-admin.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
     "dotenv": "^16.6.1",
     "express": "^4.22.3",
+    "express-rate-limit": "^8.7.3",
+    "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.24.7"
+  },
+  "devDependencies": {
+    "supertest": "^7.3.1",
+    "vitest": "^2.1.9"
   }
 }
