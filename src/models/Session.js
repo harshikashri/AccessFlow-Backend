@@ -40,6 +40,7 @@ const sessionSchema = new mongoose.Schema(
 
 sessionSchema.index({ userId: 1, organizationId: 1 });
 sessionSchema.index({ expiresAt: 1 });
+sessionSchema.index({ refreshTokenHash: 1 }, { unique: true });
 
 const Session = mongoose.model('Session', sessionSchema, 'sessions');
 
