@@ -23,7 +23,7 @@ const organizationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-organizationSchema.index({ name: 1 });
+organizationSchema.index({ name: 1 }, { unique: true });
 
 const Organization = mongoose.model('Organization', organizationSchema, 'organizations');
 

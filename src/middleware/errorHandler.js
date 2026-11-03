@@ -25,8 +25,17 @@ export const errorHandler = (err, req, res, next) => {
     message = 'Invalid identifier provided.';
   } else if (err.code === 11000) {
     statusCode = 409;
-    code = 'DUPLICATE_KEY';
-    message = 'A record with the same unique value already exists.';
+    const fields = Object.keys(err.keyPattern || err.keyValue || {});
+    if (fields.includes('email')) {
+      code = 'EMAIL_EXISTS';
+      message = 'A user with this email already exists.';
+    } else if (fields.includes('name') && err.message?.includes('organizations')) {
+      code = 'ORGANIZATION_NAME_EXISTS';
+      message = 'An organization with this name already exists.';
+    } else {
+      code = 'DUPLICATE_KEY';
+      message = 'A record with the same unique value already exists.';
+    }
   }
 
   if (statusCode >= 500) {

@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import request from 'supertest';
 import app from '../src/app.js';
-import { connectDatabase } from '../src/config/db.js';
+import { connectDatabase, initializeDatabase } from '../src/config/db.js';
 import User from '../src/models/User.js';
 import Session from '../src/models/Session.js';
 import { hashPassword } from '../src/utils/password.js';
@@ -20,6 +20,7 @@ export const resetTestDatabase = async () => {
     throw new Error(`Refusing to drop database: ${mongoose.connection.name}`);
   }
   await mongoose.connection.dropDatabase();
+  await initializeDatabase();
 };
 
 export const disconnectTestDatabase = async () => {

@@ -21,7 +21,6 @@ const runSeed = (envOverrides = {}) =>
       cwd: backendRoot,
       env: {
         ...process.env,
-        MONGODB_URI: 'mongodb://127.0.0.1:27017/accessflow_test',
         SUPER_ADMIN_NAME: 'Seeded Super Admin',
         SUPER_ADMIN_EMAIL: 'seeded-super@example.com',
         SUPER_ADMIN_PASSWORD: TEST_PASSWORD,

@@ -174,6 +174,40 @@ Sets HttpOnly `refreshToken` cookie. Super Admin sessions use `organizationId: n
 
 ---
 
+## Organization management
+
+Organization management endpoints are restricted to authenticated Super Admins. Organization creation provisions the organization, its first Organization Admin user, the default organization-scoped role assignment, and audit records in one MongoDB transaction. MongoDB must run as a replica set (or a transaction-capable sharded cluster) for organization create, update, and activation changes.
+
+Base path: `/api/organizations`
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/organizations` | Create an organization and its first admin |
+| `GET` | `/api/organizations` | List organizations |
+| `GET` | `/api/organizations/:organizationId` | Get organization details and member counts |
+| `PATCH` | `/api/organizations/:organizationId` | Update the organization name |
+| `PATCH` | `/api/organizations/:organizationId/activate` | Activate an organization |
+| `PATCH` | `/api/organizations/:organizationId/deactivate` | Deactivate an organization |
+
+Create request:
+
+```json
+{
+  "name": "Acme Corp",
+  "admin": {
+    "name": "Jane Admin",
+    "email": "jane.admin@example.com",
+    "password": "A-strong-password1!"
+  }
+}
+```
+
+List query parameters: `page`, `limit` (maximum 100), `search`, `status` (`ACTIVE` or `INACTIVE`), `sortBy` (`name`, `createdAt`, `updatedAt`, or `status`), and `sortOrder` (`asc` or `desc`).
+
+Organization names and admin emails must be unique. Deactivated organizations remain visible to Super Admins, but their members cannot establish or refresh organization sessions until reactivation.
+
+---
+
 ## Postman testing
 
 1. Seed Super Admin and start the server.
