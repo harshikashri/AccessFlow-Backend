@@ -424,6 +424,46 @@ describe('Department management', () => {
     expect(await AuditLog.countDocuments({ action: 'DEPARTMENT_MEMBER_REMOVED', resourceId: departmentId })).toBe(1);
   });
 
+  it('repairs missing membership when the exact active Employee assignment already exists', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('existing-employee');
+    const member = await createMember({ email: 'existing-employee@example.com', organizationId });
+    const department = await createDepartment(token, { name: 'Existing Employee Department' });
+    const employeeRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE', status: 'ACTIVE' });
+    const existingAssignment = await UserRoleAssignment.create({
+      userId: member._id,
+      roleId: employeeRole._id,
+      organizationId,
+      departmentId: department.body.data.id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+      assignedBy: admin._id,
+    });
+
+    const response = await request(app)
+      .post(`/api/departments/${department.body.data.id}/members`)
+      .set(authHeader(token))
+      .send({ userIds: [String(member._id)] });
+
+    expect(response.status).toBe(200);
+    const savedUser = await User.findById(member._id);
+    expect(String(savedUser.organizationMemberships[0].departmentId)).toBe(department.body.data.id);
+    const activeAssignments = await UserRoleAssignment.find({
+      userId: member._id,
+      roleId: employeeRole._id,
+      organizationId,
+      departmentId: department.body.data.id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+    });
+    expect(activeAssignments).toHaveLength(1);
+    expect(String(activeAssignments[0]._id)).toBe(String(existingAssignment._id));
+    expect(await AuditLog.countDocuments({
+      action: 'DEPARTMENT_MEMBER_ADDED',
+      resourceId: department.body.data.id,
+      'changes.userId': String(member._id),
+    })).toBe(1);
+  });
+
   it('rolls back a batch member addition if any user is invalid or already assigned elsewhere', async () => {
     const { organizationId, token } = await createOrganizationContext('rollback');
     const first = await createMember({ email: 'rollback-first@example.com', organizationId });

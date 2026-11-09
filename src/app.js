@@ -7,6 +7,8 @@ import organizationRoutes from './modules/organizations/organization.routes.js';
 import departmentRoutes from './modules/departments/department.routes.js';
 import userRoutes from './modules/users/user.routes.js';
 import roleRoutes from './modules/roles/role.routes.js';
+import requestRoutes from './modules/requests/request.routes.js';
+import requestTypeRoutes from './modules/requests/requestType.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 const app = express();
@@ -35,6 +37,8 @@ app.use('/api/organizations', organizationRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/roles', roleRoutes);
+app.use('/api/request-types', requestTypeRoutes);
+app.use('/api/requests', requestRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

@@ -15,7 +15,12 @@ import { ORGANIZATION_ADMIN_ROLE_NAME } from '../../config/constants.js';
 import { sendInitialSetupInstructions, issueAccountSetupToken, issuePasswordResetToken } from '../auth/password-reset.service.js';
 import { USER_SETUP_TOKEN_TTL_MS, USER_ACTIONS } from './user.constants.js';
 import { escapeRegex, getScopedDepartmentIds, toPublicUser } from './user.utils.js';
-import { getBuiltInRole, persistRoleAssignments, prepareRoleAssignments } from '../roles/role.assignment.service.js';
+import {
+	getBuiltInRole,
+	ensureEmployeeDepartmentAssignment,
+	persistRoleAssignments,
+	prepareRoleAssignments,
+} from '../roles/role.assignment.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, userId, changes = {} }) => {
 	await AuditLog.create(
@@ -425,18 +430,13 @@ export const assignUserDepartment = async ({ userId, organizationId, actorId, ac
 			}
 		}
 		if (departmentId) {
-			const prepared = await prepareRoleAssignments({
-				assignments: [{ roleId: memberRole._id, scopeType: 'DEPARTMENT', departmentId }],
-				organizationId,
-				access,
-				session,
-				userId: user._id,
-			});
-			await persistRoleAssignments({
-				assignments: prepared,
+			await ensureEmployeeDepartmentAssignment({
 				userId: user._id,
 				organizationId,
+				departmentId,
+				role: memberRole,
 				actorId,
+				access,
 				session,
 			});
 		}

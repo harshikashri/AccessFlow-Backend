@@ -10,6 +10,7 @@
     "seed:super-admin": "node scripts/seed-super-admin.js",
     "migrate:role-name-normalized": "node scripts/migrate-role-name-normalized.js",
     "migrate:default-roles": "node scripts/migrate-default-roles.js",
+    "migrate:workflow-definition-types": "node scripts/migrate-workflow-definition-types.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -19,6 +19,8 @@ import {
   DEPARTMENT_MEMBER_ROLE_NAME,
 } from '../../config/constants.js';
 import { escapeRegex, toPublicAdminUser, toPublicOrganization } from './organization.utils.js';
+import WorkflowDefinition from '../../models/WorkflowDefinition.js';
+import { DEFAULT_REQUEST_TYPES } from '../requests/requestType.defaults.js';
 
 const writeAuditLog = async (session, payload) => {
   await AuditLog.create(
@@ -50,6 +52,28 @@ const ensureBuiltInRole = async ({ session, organizationId, actorId, name, roleT
     createdBy: actorId,
   }], { session });
   return role;
+};
+
+const ensureDefaultRequestTypes = async ({ session, organizationId, actorId }) => {
+  for (const definition of DEFAULT_REQUEST_TYPES) {
+    const existing = await WorkflowDefinition.findOne({
+      organizationId,
+      definitionType: 'REQUEST_TYPE',
+      codeNormalized: definition.code.toLocaleLowerCase('en-US'),
+    }).session(session);
+    if (existing) continue;
+    await WorkflowDefinition.create([{
+      ...definition,
+      definitionType: 'REQUEST_TYPE',
+      organizationId,
+      codeNormalized: definition.code.toLocaleLowerCase('en-US'),
+      stages: [],
+      version: 1,
+      isActive: true,
+      createdBy: actorId,
+      updatedBy: actorId,
+    }], { session });
+  }
 };
 
 const throwDuplicateError = (error) => {
@@ -142,6 +166,7 @@ export const createOrganization = async ({ name, admin, actorId }) => {
         ],
         { session }
       );
+      await ensureDefaultRequestTypes({ session, organizationId: organization._id, actorId: adminUser._id });
 
       await writeAuditLog(session, {
         organizationId: organization._id,

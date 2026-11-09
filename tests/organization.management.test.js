@@ -93,6 +93,13 @@ describe('Organization management', () => {
     const role = await Role.findOne({ organizationId: organization._id, name: 'Organization Admin' });
     expect(role).toBeTruthy();
     expect(role.permissions.length).toBeGreaterThan(0);
+    const employeeRole = await Role.findOne({ organizationId: organization._id, roleType: 'EMPLOYEE' });
+    expect(employeeRole.permissions).toEqual(expect.arrayContaining([
+      'requests.create',
+      'requests.edit_own_draft',
+      'requests.submit',
+      'requests.cancel_own',
+    ]));
 
     const assignment = await UserRoleAssignment.findOne({
       userId: adminUser._id,

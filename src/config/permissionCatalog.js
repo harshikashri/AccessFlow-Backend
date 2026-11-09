@@ -33,7 +33,17 @@ export const PERMISSION_MODULES = [
     permissions: [
       { id: 'requests.view', name: 'View requests', description: 'View requests within the assigned scope.' },
       { id: 'requests.create', name: 'Create requests', description: 'Create access and workflow requests.' },
+      { id: 'requests.edit_own_draft', name: 'Edit own draft requests', description: 'Edit draft requests created by the current user.' },
+      { id: 'requests.submit', name: 'Submit own requests', description: 'Submit draft requests created by the current user.' },
+      { id: 'requests.cancel_own', name: 'Cancel own requests', description: 'Cancel draft or submitted requests created by the current user.' },
       { id: 'requests.approve', name: 'Approve requests', description: 'Approve or reject requests within the assigned scope.' },
+    ],
+  },
+  {
+    id: 'requestTypes',
+    name: 'Request Type Management',
+    permissions: [
+      { id: 'requestTypes.manage', name: 'Manage request types', description: 'Create and manage organization request types.' },
     ],
   },
   {
