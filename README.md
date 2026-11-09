@@ -293,6 +293,121 @@ Example error response:
 
 ---
 
+## User management
+
+User Management creates ordinary users, including future Department Managers, through the same endpoint. The authenticated organization context is authoritative; clients cannot choose a tenant. Organization membership is embedded in the User document, and roles remain in the existing `roles` and `userRoleAssignments` collections. User Management does not create custom roles or permission codes.
+
+All tenant endpoints require a Bearer access token with an active organization context and the listed permission. Organization-scoped permissions apply throughout the organization. Department-scoped permissions apply only to users/departments in their assigned scope. Super Admin status alone does not grant tenant user-management access.
+
+| Method | Path | Purpose | Required permission |
+|---|---|---|---|
+| `POST` | `/api/users` | Create user and send setup instructions | Organization-scoped `users.create` |
+| `GET` | `/api/users` | List/search/filter users | `users.view` |
+| `GET` | `/api/users/:userId` | Get a user profile | `users.view` |
+| `PATCH` | `/api/users/:userId` | Update name/email | `users.edit` |
+| `PATCH` | `/api/users/:userId/department` | Assign/remove department | `users.edit` |
+| `PATCH` | `/api/users/:userId/activate` | Activate organization membership | `users.deactivate` |
+| `PATCH` | `/api/users/:userId/deactivate` | Deactivate organization membership | `users.deactivate` |
+| `POST` | `/api/users/:userId/password-reset` | Send setup/reset instructions | `users.edit` |
+| `POST` | `/api/auth/set-password` | Complete initial password setup | Public, one-time token |
+| `POST` | `/api/auth/forgot-password` | Request reset instructions | Public, rate-limited |
+| `POST` | `/api/auth/reset-password` | Complete password reset | Public, one-time token |
+
+Create request:
+
+```json
+{
+  "name": "John Smith",
+  "email": "john@example.com",
+  "departmentId": "DEPARTMENT_OBJECT_ID",
+  "roleAssignments": [
+    {
+      "roleId": "ROLE_OBJECT_ID",
+      "scopeType": "DEPARTMENT",
+      "departmentId": "DEPARTMENT_OBJECT_ID"
+    }
+  ]
+}
+```
+
+Example create response (`passwordSetupRequired` is true until setup completes):
+
+```json
+{
+  "success": true,
+  "message": "User created. Password setup instructions have been sent.",
+  "data": {
+    "id": "USER_OBJECT_ID",
+    "name": "John Smith",
+    "email": "john@example.com",
+    "accountStatus": "INACTIVE",
+    "passwordSetupRequired": true,
+    "membership": {
+      "organizationId": "ORGANIZATION_OBJECT_ID",
+      "departmentId": "DEPARTMENT_OBJECT_ID",
+      "status": "ACTIVE"
+    },
+    "roleAssignments": []
+  }
+}
+```
+
+`departmentId` and `roleAssignments` are optional. New users are created `INACTIVE` with `passwordSetupRequired: true`; no administrator-provided password is accepted. A random initial password hash is stored only as an unusable placeholder. A single-use setup token is sent by email; only its SHA-256 hash and 30-minute expiry are stored in the User document. Successful setup stores the chosen bcrypt password hash, clears the token, and activates the global account.
+
+Role assignments must reference active roles in the same organization. Department-scoped assignments must reference an active department in that organization. Callers cannot grant role permissions beyond their own effective permissions/scope. Creating or editing roles remains outside this module; provision roles and permissions through a separate trusted process until Dynamic Role Management is implemented.
+
+List query parameters: `page`, `limit` (maximum 100), `search` (case-insensitive name/email), `status` (`ACTIVE` or `INACTIVE` global account status), `departmentId` (use the literal `null` to filter unassigned users), `roleId`, `sortBy` (`name`, `email`, `accountStatus`, `createdAt`, or `updatedAt`), and `sortOrder` (`asc` or `desc`). Results are tenant-filtered and paginated in MongoDB. User responses expose only the caller's organization membership, safe role assignment summaries, and department details; password hashes and token hashes are never returned.
+
+Profile update accepts only `name` and `email`. Changing email enforces global uniqueness and revokes the user's active sessions; email verification is not currently implemented. Department assignment accepts `{"departmentId":"..."}` or `{"departmentId":null}` and changes only the matching embedded membership. Department-scoped actors can only work within their assigned department. Deactivation marks that organization's membership `INACTIVE` and revokes sessions for that organization, while preserving the account and other organization memberships. Self-deactivation and deactivation of the last active Organization Admin are rejected. Activation reactivates the selected membership; it does not override a globally inactive account or an incomplete setup.
+
+Password requests:
+
+```json
+POST /api/auth/set-password
+{
+  "token": "ONE_TIME_SETUP_TOKEN",
+  "password": "StrongPassword123!",
+  "confirmPassword": "StrongPassword123!"
+}
+```
+
+```json
+POST /api/auth/forgot-password
+{ "email": "john@example.com" }
+```
+
+```json
+POST /api/auth/reset-password
+{
+  "token": "ONE_TIME_RESET_TOKEN",
+  "password": "NewStrongPassword123!",
+  "confirmPassword": "NewStrongPassword123!"
+}
+```
+
+`POST /api/auth/forgot-password` returns the same generic response for unknown users, ineligible users, and provider delivery failures; it does not confirm delivery. Missing email configuration returns a controlled `503` before account lookup. Password reset tokens are single-use, hashed at rest, and expire after 30 minutes. Successful reset revokes all sessions for that user and requires login again. Admin-initiated reset accepts no body. For users pending initial setup, it resends setup instructions; for active users, it sends reset instructions. If account-creation email fails after the user transaction commits, the endpoint returns a controlled `502`, keeps the account pending setup, and an administrator can retry using the password-reset endpoint.
+
+For compatibility with users created before `passwordSetupRequired` was added, a missing value is treated as setup-complete. Only an explicit `true` value blocks login or password reset.
+
+Email uses Resend via the `EMAIL_PROVIDER`, `RESEND_API_KEY`, and `EMAIL_FROM` environment variables. With `EMAIL_TEST_MODE=true`, all messages go only to `EMAIL_TEST_RECIPIENT`; the rendered message still identifies the intended account. With test mode disabled, messages go to the registered address. `CLIENT_URL` is used to construct `/set-password?token=...` and `/reset-password?token=...` links. The frontend routes are expected to be implemented by the separate frontend application; this backend does not implement those screens. Provider credentials and raw tokens are never returned or logged.
+
+User audit actions include `USER_CREATED`, `USER_UPDATED`, `USER_ACTIVATED`, `USER_DEACTIVATED`, `USER_DEPARTMENT_ASSIGNED`, `USER_DEPARTMENT_REMOVED`, `USER_ROLE_ASSIGNED`, `USER_PASSWORD_SETUP_COMPLETED`, `USER_PASSWORD_RESET_REQUESTED`, `USER_PASSWORD_RESET_COMPLETED`, and `USER_ADMIN_PASSWORD_RESET_REQUESTED`. Multi-document writes and audits use transactions. No collections were added; setup/reset metadata is stored on the existing User documents.
+
+Common errors include `EMAIL_EXISTS` (`409`), `INVALID_ROLE_ASSIGNMENT` (`400`), `ROLE_ASSIGNMENT_FORBIDDEN` (`403`), `INVALID_DEPARTMENT` (`400`), `LAST_ORGANIZATION_ADMIN` (`409`), `SELF_DEACTIVATION_FORBIDDEN` (`403`), `PASSWORD_SETUP_REQUIRED` (`403`), `INVALID_SETUP_TOKEN`/`INVALID_RESET_TOKEN` (`400`), `EMAIL_NOT_CONFIGURED` (`503`), and controlled email delivery failures (`502`).
+
+### Manual testing
+
+1. Configure the existing `.env` email variables. For local testing, use `EMAIL_PROVIDER=resend`, set the Resend API key and sender, and set `EMAIL_TEST_MODE=true` with `EMAIL_TEST_RECIPIENT` authorized by Resend. Do not display or commit secret values.
+2. Log in as an Organization Admin and save `data.accessToken` as `accessToken`. Send `POST /api/users` with a name, email, optional department ID, and optional existing role assignments. The recipient is routed to the test email in test mode; the email contains the intended account address and one-time link.
+3. Use the `token` query value from the email’s `/set-password` link in `POST /api/auth/set-password` with matching `password` and `confirmPassword` values.
+4. Log in as the created user through `POST /api/auth/login` and save its access token. Verify `GET /api/users/:userId`, then list/search with `GET /api/users?page=1&limit=10&search=john&status=ACTIVE&sortBy=name&sortOrder=asc` using the admin token.
+5. Update the profile with `PATCH /api/users/:userId` and a `name` and/or `email` body. Assign/remove a department with `PATCH /api/users/:userId/department` and `{"departmentId":"DEPARTMENT_OBJECT_ID"}` or `{"departmentId":null}`.
+6. Exercise `PATCH /api/users/:userId/deactivate` and `/activate` using an authorized admin. Verify only the target organization membership changes and its sessions are revoked.
+7. Test self-service reset with `POST /api/auth/forgot-password`, then submit the emailed token and matching new passwords to `POST /api/auth/reset-password`. The forgot-password response is generic and does not prove email delivery.
+8. Test admin reset with `POST /api/users/:userId/password-reset` using the admin token. It sends setup instructions for a pending account or reset instructions for an active account; complete the emailed token via the corresponding `/api/auth/set-password` or `/api/auth/reset-password` endpoint.
+
+---
+
 ## Postman testing
 
 1. Seed Super Admin and start the server.

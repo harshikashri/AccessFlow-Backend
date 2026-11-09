@@ -5,7 +5,13 @@ import {
 } from '../../utils/cookie.js';
 import { AppError } from '../../utils/AppError.js';
 import * as authService from './auth.service.js';
-import { validateLoginInput } from './auth.validation.js';
+import {
+  validateForgotPasswordInput,
+  validateLoginInput,
+  validateResetPasswordInput,
+  validateSetPasswordInput,
+} from './auth.validation.js';
+import * as passwordResetService from './password-reset.service.js';
 
 const clearAuthCookie = (res) => {
   clearRefreshTokenCookie(res);
@@ -93,10 +99,37 @@ export const me = async (req, res) => {
   });
 };
 
+export const setPassword = async (req, res) => {
+  const input = validateSetPasswordInput(req.body);
+  await passwordResetService.completeInitialPasswordSetup(input);
+  return res.status(200).json({ success: true, message: 'Password setup completed. You can now sign in.' });
+};
+
+export const forgotPassword = async (req, res) => {
+  const { email } = validateForgotPasswordInput(req.body);
+  await passwordResetService.requestForgotPassword(email);
+  return res.status(200).json({
+    success: true,
+    message: 'If an eligible account exists, password instructions were requested. This response does not confirm email delivery.',
+  });
+};
+
+export const resetPassword = async (req, res) => {
+  const input = validateResetPasswordInput(req.body);
+  await passwordResetService.completePasswordReset(input);
+  return res.status(200).json({
+    success: true,
+    message: 'Password reset completed. Please sign in again.',
+  });
+};
+
 export default {
   login,
   refresh,
   logout,
   logoutAll,
   me,
+  setPassword,
+  forgotPassword,
+  resetPassword,
 };

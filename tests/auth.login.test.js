@@ -100,6 +100,21 @@ describe('Auth login', () => {
     expect(await Session.countDocuments()).toBe(0);
   });
 
+  it('rejects login before first-time password setup is complete', async () => {
+    const user = await createUser({ email: 'pending-setup@example.com' });
+    user.passwordSetupRequired = true;
+    await user.save();
+
+    const response = await loginRequest({
+      email: user.email,
+      password: TEST_PASSWORD,
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('PASSWORD_SETUP_REQUIRED');
+    expect(await Session.countDocuments({ userId: user._id })).toBe(0);
+  });
+
   it('requires organization selection for multi-org users', async () => {
     const orgA = new mongoose.Types.ObjectId();
     const orgB = new mongoose.Types.ObjectId();
