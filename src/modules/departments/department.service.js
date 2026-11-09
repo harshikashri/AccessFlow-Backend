@@ -9,7 +9,12 @@ import { AppError } from '../../utils/AppError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { DEPARTMENT_ACTIONS } from './department.constants.js';
 import { escapeRegex, getScopedDepartmentIds, toPublicDepartment, toPublicDepartmentUser } from './department.utils.js';
-import { getBuiltInRole, persistRoleAssignments, prepareRoleAssignments } from '../roles/role.assignment.service.js';
+import {
+	getBuiltInRole,
+	ensureEmployeeDepartmentAssignment,
+	persistRoleAssignments,
+	prepareRoleAssignments,
+} from '../roles/role.assignment.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, departmentId, changes }) => {
 	await AuditLog.create(
@@ -492,18 +497,13 @@ export const addDepartmentMembers = async ({ departmentId, organizationId, actor
 			membership.departmentId = department._id;
 			await user.save({ session });
 			const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
-			const prepared = await prepareRoleAssignments({
-				assignments: [{ roleId: memberRole._id, scopeType: 'DEPARTMENT', departmentId: department._id }],
-				organizationId,
-				access,
-				session,
-				userId,
-			});
-			await persistRoleAssignments({
-				assignments: prepared,
+			await ensureEmployeeDepartmentAssignment({
 				userId,
 				organizationId,
+				departmentId: department._id,
+				role: memberRole,
 				actorId,
+				access,
 				session,
 			});
 			await writeAuditLog(session, {

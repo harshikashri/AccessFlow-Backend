@@ -184,4 +184,53 @@ export const persistRoleAssignments = async ({
   return UserRoleAssignment.create(documents, { session, ordered: true });
 };
 
-export default { getBuiltInRole, prepareRoleAssignments, persistRoleAssignments };
+export const ensureEmployeeDepartmentAssignment = async ({
+  userId,
+  organizationId,
+  departmentId,
+  role,
+  actorId,
+  access,
+  session,
+}) => {
+  if (getRoleType(role) !== 'EMPLOYEE') {
+    throw new AppError(
+      'Only the built-in Employee role can be ensured through department membership.',
+      400,
+      'INVALID_EMPLOYEE_ROLE'
+    );
+  }
+
+  const prepared = await prepareRoleAssignments({
+    assignments: [{ roleId: role._id, scopeType: 'DEPARTMENT', departmentId }],
+    organizationId,
+    access,
+    session,
+    userId,
+  });
+  const existing = await UserRoleAssignment.findOne({
+    userId,
+    organizationId,
+    roleId: role._id,
+    scopeType: 'DEPARTMENT',
+    departmentId,
+    status: 'ACTIVE',
+  }).session(session);
+  if (existing) return existing;
+
+  const [created] = await persistRoleAssignments({
+    assignments: prepared,
+    userId,
+    organizationId,
+    actorId,
+    session,
+  });
+  return created;
+};
+
+export default {
+  getBuiltInRole,
+  prepareRoleAssignments,
+  persistRoleAssignments,
+  ensureEmployeeDepartmentAssignment,
+};

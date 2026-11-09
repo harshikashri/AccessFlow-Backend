@@ -90,6 +90,28 @@ const processOrganization = async (organization) => {
               }], { session });
             }
           }
+          if (definition.roleType === 'EMPLOYEE') {
+            const missingPermissions = definition.permissions.filter(
+              (permission) => !role.permissions.includes(permission)
+            );
+            if (missingPermissions.length) {
+              if (dryRun) {
+                changes.push(`add permissions=${missingPermissions.join(',')} to ${role._id}`);
+              } else {
+                role.permissions = [...new Set([...role.permissions, ...missingPermissions])];
+                await role.save({ session });
+                await AuditLog.create([{
+                  organizationId: organization._id,
+                  actorId: organization.createdBy,
+                  action: 'DEFAULT_ROLE_BACKFILLED',
+                  resourceType: 'Role',
+                  resourceId: role._id,
+                  changes: { permissions: { added: missingPermissions } },
+                  timestamp: new Date(),
+                }], { session });
+              }
+            }
+          }
           continue;
         }
         changes.push(`create ${definition.roleType} (${definition.name})`);

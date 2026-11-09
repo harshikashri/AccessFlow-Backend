@@ -5,12 +5,16 @@ export const REQUEST_TYPES = ['PURCHASE', 'LEAVE', 'ACCESS', 'GENERAL'];
 export const REQUEST_STATUSES = [
   'DRAFT',
   'SUBMITTED',
+  'CANCELLED',
   'PENDING_APPROVAL',
   'RETURNED',
   'REJECTED',
   'APPROVED',
-  'CANCELLED',
 ];
+
+export const REQUEST_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
+export const REQUEST_DEFINITION_TYPES = ['REQUEST_TYPE', 'APPROVAL_WORKFLOW'];
+export const REQUEST_FIELD_TYPES = ['TEXT', 'TEXTAREA', 'NUMBER', 'DATE', 'SELECT', 'MULTI_SELECT', 'CHECKBOX'];
 
 export const ENTITY_STATUS = ['ACTIVE', 'INACTIVE'];
 
@@ -47,6 +51,9 @@ export const DEPARTMENT_MEMBER_PERMISSIONS = [
   'users.view',
   'requests.view',
   'requests.create',
+  'requests.edit_own_draft',
+  'requests.submit',
+  'requests.cancel_own',
   'dashboard.view',
 ];
 
