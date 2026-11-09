@@ -47,6 +47,26 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    passwordSetupRequired: {
+      type: Boolean,
+      default: false,
+    },
+    passwordSetupTokenHash: {
+      type: String,
+      select: false,
+    },
+    passwordSetupTokenExpiresAt: {
+      type: Date,
+      select: false,
+    },
+    passwordResetTokenHash: {
+      type: String,
+      select: false,
+    },
+    passwordResetTokenExpiresAt: {
+      type: Date,
+      select: false,
+    },
     organizationMemberships: [organizationMembershipSchema],
     accountStatus: {
       type: String,

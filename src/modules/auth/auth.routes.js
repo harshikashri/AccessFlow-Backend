@@ -58,6 +58,27 @@ router.post(
 );
 
 router.post(
+  '/set-password',
+  authRateLimiter,
+  validateAuthOrigin,
+  asyncHandler(authController.setPassword)
+);
+
+router.post(
+  '/forgot-password',
+  authRateLimiter,
+  validateAuthOrigin,
+  asyncHandler(authController.forgotPassword)
+);
+
+router.post(
+  '/reset-password',
+  authRateLimiter,
+  validateAuthOrigin,
+  asyncHandler(authController.resetPassword)
+);
+
+router.post(
   '/logout',
   validateAuthOrigin,
   asyncHandler(softAuthenticate),

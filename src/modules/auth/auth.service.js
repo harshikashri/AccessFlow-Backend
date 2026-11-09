@@ -66,6 +66,16 @@ const assertUserActive = (user) => {
   }
 };
 
+const assertPasswordSetupComplete = (user) => {
+  if (user.passwordSetupRequired) {
+    throw new AppError(
+      'Complete password setup before signing in.',
+      403,
+      'PASSWORD_SETUP_REQUIRED'
+    );
+  }
+};
+
 const assertSessionActive = (session) => {
   if (!session) {
     throw new AppError('Session not found.', 401, 'SESSION_NOT_FOUND');
@@ -143,6 +153,7 @@ export const login = async ({ email, password, organizationId }) => {
     throw invalidCredentials();
   }
 
+  assertPasswordSetupComplete(user);
   assertUserActive(user);
 
   const resolvedOrganizationId = resolveOrganizationContext(user, organizationId);
@@ -188,6 +199,8 @@ export const refresh = async (rawRefreshToken) => {
     );
     throw new AppError('User associated with this session no longer exists.', 401, 'USER_NOT_FOUND');
   }
+
+  assertPasswordSetupComplete(user);
 
   if (user.accountStatus !== 'ACTIVE') {
     await Session.updateOne(
@@ -274,6 +287,7 @@ export const getCurrentUser = async ({ userId, sessionId }) => {
   if (!user) {
     throw new AppError('User not found.', 401, 'USER_NOT_FOUND');
   }
+  assertPasswordSetupComplete(user);
   assertUserActive(user);
 
   const session = await Session.findById(sessionId);
@@ -295,6 +309,7 @@ export const loadAuthContext = async ({ userId, sessionId, organizationId, platf
   if (!user) {
     throw new AppError('User not found.', 401, 'USER_NOT_FOUND');
   }
+  assertPasswordSetupComplete(user);
   assertUserActive(user);
 
   const session = await Session.findById(sessionId);
