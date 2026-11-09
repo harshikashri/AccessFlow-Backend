@@ -22,7 +22,14 @@ import Department from '../../src/models/Department.js';
 import Role from '../../src/models/Role.js';
 import UserRoleAssignment from '../../src/models/UserRoleAssignment.js';
 import AuditLog from '../../src/models/AuditLog.js';
-import { ORGANIZATION_ADMIN_PERMISSIONS, ORGANIZATION_ADMIN_ROLE_NAME } from '../../src/config/constants.js';
+import {
+  DEPARTMENT_MANAGER_PERMISSIONS,
+  DEPARTMENT_MANAGER_ROLE_NAME,
+  DEPARTMENT_MEMBER_PERMISSIONS,
+  DEPARTMENT_MEMBER_ROLE_NAME,
+  ORGANIZATION_ADMIN_PERMISSIONS,
+  ORGANIZATION_ADMIN_ROLE_NAME,
+} from '../../src/config/constants.js';
 
 const authHeader = (token) => ({ Authorization: `Bearer ${token}` });
 
@@ -48,6 +55,24 @@ const createOrganizationContext = async (suffix = 'one') => {
     status: 'ACTIVE',
     createdBy: platformAdmin._id,
   });
+  await Role.create([
+    {
+      organizationId,
+      name: DEPARTMENT_MANAGER_ROLE_NAME,
+      roleType: 'DEPARTMENT_MANAGER',
+      permissions: DEPARTMENT_MANAGER_PERMISSIONS,
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    },
+    {
+      organizationId,
+      name: DEPARTMENT_MEMBER_ROLE_NAME,
+      roleType: 'EMPLOYEE',
+      permissions: DEPARTMENT_MEMBER_PERMISSIONS,
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    },
+  ]);
   await UserRoleAssignment.create({
     userId: admin._id,
     roleId: role._id,
@@ -149,12 +174,46 @@ describe('User management', () => {
       password: TEST_PASSWORD,
       confirmPassword: TEST_PASSWORD,
     });
+
     expect(setup.status).toBe(200);
     expect((await User.findById(createdUser._id)).passwordSetupRequired).toBe(false);
     expect((await User.collection.findOne({ _id: createdUser._id })).passwordSetupTokenHash).toBeUndefined();
 
     const login = await loginRequest({ email: createdUser.email, password: TEST_PASSWORD });
     expect(login.status).toBe(200);
+  });
+
+  it('rejects duplicate role assignments and rolls back user creation when assignment validation fails', async () => {
+    const { organizationId, token } = await createOrganizationContext('assignment-rollback');
+    const role = await Role.create({
+      organizationId,
+      name: 'Rollback Role',
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+
+    const duplicate = await createUserViaApi(token, {
+      name: 'Duplicate Assignment',
+      email: 'duplicate-assignment@example.com',
+      roleAssignments: [
+        { roleId: String(role._id), scopeType: 'ORGANIZATION' },
+        { roleId: String(role._id), scopeType: 'ORGANIZATION' },
+      ],
+    });
+    expect(duplicate.status).toBe(400);
+    expect(duplicate.body.code).toBe('VALIDATION_ERROR');
+    expect(await User.exists({ email: 'duplicate-assignment@example.com' })).toBeNull();
+
+    await Role.updateOne({ _id: role._id }, { $set: { status: 'INACTIVE' } });
+    const invalid = await createUserViaApi(token, {
+      name: 'Rolled Back User',
+      email: 'rolled-back-user@example.com',
+      roleAssignments: [{ roleId: String(role._id), scopeType: 'ORGANIZATION' }],
+    });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('INVALID_ROLE_ASSIGNMENT');
+    expect(await User.exists({ email: 'rolled-back-user@example.com' })).toBeNull();
   });
 
   it('rejects invalid create fields, duplicate email, and cross-organization roles/departments', async () => {
@@ -254,6 +313,43 @@ describe('User management', () => {
     expect(response.body.code).toBe('ROLE_ASSIGNMENT_FORBIDDEN');
     expect(await User.findOne({ email: 'escalated-user@example.com' })).toBeNull();
     expect(token).toBeTruthy();
+  });
+
+  it('applies centralized role compatibility during user creation as well as role assignment', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('user-role-compatibility');
+    const employeeRole = await Role.create({
+      organizationId,
+      name: 'Employee Designation',
+      roleType: 'EMPLOYEE',
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    });
+    const managerRole = await Role.create({
+      organizationId,
+      name: 'Department Manager',
+      roleType: 'DEPARTMENT_MANAGER',
+      permissions: ['departments.view'],
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    });
+    const department = await Department.create({ organizationId, name: 'Compatible Scope' });
+
+    const response = await createUserViaApi(token, {
+      name: 'Conflicting User',
+      email: 'conflicting-user@example.com',
+      roleAssignments: [
+        { roleId: String(employeeRole._id), scopeType: 'ORGANIZATION' },
+        {
+          roleId: String(managerRole._id),
+          scopeType: 'DEPARTMENT',
+          departmentId: String(department._id),
+        },
+      ],
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('ROLE_COMPATIBILITY_CONFLICT');
+    expect(await User.findOne({ email: 'conflicting-user@example.com' })).toBeNull();
   });
 
   it('returns tenant-safe details and paginated, searchable, filterable users', async () => {

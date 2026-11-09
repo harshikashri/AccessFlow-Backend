@@ -95,7 +95,7 @@ export const initializeDatabase = async () => {
     }
   }
 
-  for (const model of Object.values(registeredModels)) {
+  for (const model of Object.values(registeredModels).filter((candidate) => candidate !== Role)) {
     await model.syncIndexes();
   }
 

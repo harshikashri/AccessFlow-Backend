@@ -408,6 +408,79 @@ Common errors include `EMAIL_EXISTS` (`409`), `INVALID_ROLE_ASSIGNMENT` (`400`),
 
 ---
 
+## Dynamic role management
+
+Roles and user assignments are stored in the existing `roles` and `userRoleAssignments` collections. Every role-management endpoint requires an authenticated active organization context, an active organization-wide `Organization Admin` role assignment, and the endpoint's `roles.*` permission. Super Admin status alone does not grant tenant role-management access. Role and assignment queries are always scoped to the authenticated organization.
+
+| Method | Path | Purpose | Required permission |
+|---|---|---|---|
+| `POST` | `/api/roles` | Create a custom role | `roles.create` |
+| `GET` | `/api/roles` | Search/list roles | `roles.view` |
+| `GET` | `/api/roles/:roleId` | Get role details and assignment count | `roles.view` |
+| `PATCH` | `/api/roles/:roleId` | Update name/description | `roles.edit` |
+| `PATCH` | `/api/roles/:roleId/permissions` | Replace permission set | `roles.edit` |
+| `GET` | `/api/roles/permissions/catalog` | Get centralized permission catalog | `roles.view` |
+| `PATCH` | `/api/roles/:roleId/activate` | Activate a role | `roles.edit` |
+| `PATCH` | `/api/roles/:roleId/deactivate` | Deactivate a role without deleting it | `roles.edit` |
+| `POST` | `/api/roles/:roleId/assign` | Assign a role to a user | `roles.edit` |
+| `DELETE` | `/api/roles/:roleId/assign/:userId` | Inactivate one scoped assignment | `roles.edit` |
+| `GET` | `/api/roles/users/:userId` | List a user's role assignments | `roles.view` |
+| `GET` | `/api/roles/:roleId/users` | List role assignments/users | `roles.view` |
+
+Create role request:
+
+```json
+{
+  "name": "Finance Approver",
+  "description": "Reviews and approves finance requests",
+  "roleType": "CUSTOM",
+  "permissions": ["requests.view", "requests.approve"]
+}
+```
+
+`roleType` accepts `CUSTOM`, `EMPLOYEE`, or `DEPARTMENT_MANAGER`. The built-in `ORGANIZATION_ADMIN` type is provisioned by Organization Management and cannot be created through this API. When omitted, a new role defaults to `CUSTOM`.
+
+Replace permissions with `PATCH /api/roles/:roleId/permissions`:
+
+```json
+{
+  "permissions": ["requests.view", "requests.approve", "dashboard.view"]
+}
+```
+
+The permission catalog is source-defined and returned under `data.modules`; only catalog IDs may be stored. It describes permissions for currently implemented operations: `users.view/create/edit/deactivate`, `departments.view/create/edit`, `roles.view/create/edit`, `requests.view/create/approve`, `workflows.view/manage`, `audit_logs.view`, and `dashboard.view`.
+
+Organization assignment:
+
+```json
+{
+  "userId": "USER_OBJECT_ID",
+  "scopeType": "ORGANIZATION"
+}
+```
+
+Department assignment:
+
+```json
+{
+  "userId": "USER_OBJECT_ID",
+  "scopeType": "DEPARTMENT",
+  "departmentId": "DEPARTMENT_OBJECT_ID"
+}
+```
+
+Remove one assignment with `DELETE /api/roles/:roleId/assign/:userId`; send the matching scope in the JSON body. For example, `{ "scopeType": "ORGANIZATION" }` or `{ "scopeType": "DEPARTMENT", "departmentId": "DEPARTMENT_OBJECT_ID" }`. Removal marks only that assignment `INACTIVE`; it does not delete the user or membership.
+
+Assignments require an active user and membership in the current organization. The role and, for department scope, department must be active and belong to that organization. Duplicate active assignments are rejected. Permission evaluation reloads active roles and assignments from MongoDB for each request; permissions are not embedded in JWTs. Role deactivation, permission edits, and assignment removal therefore affect existing access tokens immediately, while user login remains available when the account and membership are active.
+
+Roles use the optional `roleType` metadata on the existing Role document. Compatibility rules reject Employee plus Department Manager, and Employee plus Organization Admin, within one organization. Finance Approver and Report Viewer remain compatible. Department Manager and department-scoped custom roles must use the same department; organization-scoped roles may coexist. The same compatibility validator is used by role assignment and User creation. Existing Organization Admin role documents without `roleType` are recognized by the existing built-in role identifier.
+
+Deactivating a role preserves the role and assignments but removes its permissions from effective authorization. Reactivation restores permissions only through assignments that remain active. The last active Organization Admin able to manage roles cannot be deactivated, stripped of `roles.view/create/edit`, or unassigned. Role changes and assignment writes are transactional with append-only audit events: `ROLE_CREATED`, `ROLE_UPDATED`, `ROLE_PERMISSIONS_UPDATED`, `ROLE_ACTIVATED`, `ROLE_DEACTIVATED`, `ROLE_ASSIGNED`, and `ROLE_UNASSIGNED`.
+
+Manual Postman sequence: log in as an Organization Admin; create a role with `POST /api/roles`; inspect available permission IDs with `GET /api/roles/permissions/catalog`; assign it using `POST /api/roles/:roleId/assign`; verify with `GET /api/roles/users/:userId`; update permissions or deactivate the role; reuse the assignee's existing access token to confirm permissions take effect immediately; then reactivate or remove the assignment. Role endpoints return `403` for non-Organization Admin actors and `404` for resources outside the caller's organization.
+
+---
+
 ## Postman testing
 
 1. Seed Super Admin and start the server.

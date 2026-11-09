@@ -1,3 +1,5 @@
+import { PERMISSION_CATALOG, PERMISSION_MODULES } from './permissionCatalog.js';
+
 export const REQUEST_TYPES = ['PURCHASE', 'LEAVE', 'ACCESS', 'GENERAL'];
 
 export const REQUEST_STATUSES = [
@@ -17,30 +19,15 @@ export const APPROVER_TYPES = ['DEPARTMENT_MANAGER', 'ROLE', 'USER'];
 export const APPROVAL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'RETURNED', 'SKIPPED'];
 
 export const SCOPE_TYPES = ['ORGANIZATION', 'DEPARTMENT'];
+export const ROLE_TYPES = ['ORGANIZATION_ADMIN', 'DEPARTMENT_MANAGER', 'EMPLOYEE', 'CUSTOM'];
 
 export const CONDITIONAL_OPERATORS = ['GREATER_THAN', 'LESS_THAN', 'EQUALS'];
 
-export const PERMISSION_CATALOG = [
-  'users.view',
-  'users.create',
-  'users.edit',
-  'users.deactivate',
-  'departments.view',
-  'departments.create',
-  'departments.edit',
-  'roles.view',
-  'roles.create',
-  'roles.edit',
-  'requests.view',
-  'requests.create',
-  'requests.approve',
-  'workflows.view',
-  'workflows.manage',
-  'audit_logs.view',
-  'dashboard.view',
-];
+export { PERMISSION_CATALOG, PERMISSION_MODULES };
 
 export const ORGANIZATION_ADMIN_ROLE_NAME = 'Organization Admin';
+export const DEPARTMENT_MANAGER_ROLE_NAME = 'Department Manager';
+export const DEPARTMENT_MEMBER_ROLE_NAME = 'Department Member';
 
 /**
  * Organization Admin receives existing catalog permissions only.
@@ -48,6 +35,20 @@ export const ORGANIZATION_ADMIN_ROLE_NAME = 'Organization Admin';
  * not permission codes (no organizations.* codes exist in the catalog).
  */
 export const ORGANIZATION_ADMIN_PERMISSIONS = [...PERMISSION_CATALOG];
+export const DEPARTMENT_MANAGER_PERMISSIONS = [
+  'users.view',
+  'users.edit',
+  'departments.view',
+  'departments.edit',
+  'requests.view',
+  'dashboard.view',
+];
+export const DEPARTMENT_MEMBER_PERMISSIONS = [
+  'users.view',
+  'requests.view',
+  'requests.create',
+  'dashboard.view',
+];
 
 export const AUDIT_ACTIONS = {
   ORGANIZATION_CREATED: 'ORGANIZATION_CREATED',

@@ -9,6 +9,7 @@ import { AppError } from '../../utils/AppError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { DEPARTMENT_ACTIONS } from './department.constants.js';
 import { escapeRegex, getScopedDepartmentIds, toPublicDepartment, toPublicDepartmentUser } from './department.utils.js';
+import { getBuiltInRole, persistRoleAssignments, prepareRoleAssignments } from '../roles/role.assignment.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, departmentId, changes }) => {
 	await AuditLog.create(
@@ -158,6 +159,22 @@ const assertManagerEligibility = async ({ userIds, departmentId, organizationId,
 			{ userIds: ineligibleIds }
 		);
 	}
+};
+
+const deactivateScopedRoleAssignment = async ({ userId, organizationId, roleId, departmentId, session }) => {
+	const assignment = await UserRoleAssignment.findOne({
+		userId,
+		organizationId,
+		roleId,
+		scopeType: 'DEPARTMENT',
+		departmentId,
+		status: 'ACTIVE',
+	}).session(session);
+	if (assignment) {
+		assignment.status = 'INACTIVE';
+		await assignment.save({ session });
+	}
+	return assignment;
 };
 
 const departmentCountsPipeline = (organizationId) => [
@@ -381,7 +398,6 @@ export const replaceDepartmentManagers = async ({ departmentId, organizationId, 
 			organizationId,
 			session,
 		});
-
 		const previousIds = department.managerIds.map(String);
 		const nextIds = normalizedIds.map(String);
 		const added = nextIds.filter((id) => !previousIds.includes(id));
@@ -392,6 +408,32 @@ export const replaceDepartmentManagers = async ({ departmentId, organizationId, 
 
 		department.managerIds = normalizedIds;
 		await department.save({ session });
+		const managerRole = await getBuiltInRole({ organizationId, roleType: 'DEPARTMENT_MANAGER', session });
+		const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
+		for (const userId of added) {
+			await deactivateScopedRoleAssignment({
+				userId, organizationId, roleId: memberRole._id, departmentId: department._id, session,
+			});
+			const prepared = await prepareRoleAssignments({
+				assignments: [{ roleId: managerRole._id, scopeType: 'DEPARTMENT', departmentId: department._id }],
+				organizationId,
+				access,
+				session,
+				userId,
+			});
+			await persistRoleAssignments({
+				assignments: prepared,
+				userId,
+				organizationId,
+				actorId,
+				session,
+			});
+		}
+		for (const userId of removed) {
+			await deactivateScopedRoleAssignment({
+				userId, organizationId, roleId: managerRole._id, departmentId: department._id, session,
+			});
+		}
 		for (const userId of added) {
 			await writeAuditLog(session, {
 				organizationId,
@@ -449,6 +491,21 @@ export const addDepartmentMembers = async ({ departmentId, organizationId, actor
 			}
 			membership.departmentId = department._id;
 			await user.save({ session });
+			const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
+			const prepared = await prepareRoleAssignments({
+				assignments: [{ roleId: memberRole._id, scopeType: 'DEPARTMENT', departmentId: department._id }],
+				organizationId,
+				access,
+				session,
+				userId,
+			});
+			await persistRoleAssignments({
+				assignments: prepared,
+				userId,
+				organizationId,
+				actorId,
+				session,
+			});
 			await writeAuditLog(session, {
 				organizationId,
 				actorId,
@@ -488,6 +545,10 @@ export const removeDepartmentMember = async ({ departmentId, userId, organizatio
 
 		membership.departmentId = null;
 		await user.save({ session });
+		const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
+		await deactivateScopedRoleAssignment({
+			userId, organizationId, roleId: memberRole._id, departmentId: department._id, session,
+		});
 		await writeAuditLog(session, {
 			organizationId,
 			actorId,

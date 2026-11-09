@@ -17,7 +17,14 @@ import Department from '../../src/models/Department.js';
 import Role from '../../src/models/Role.js';
 import UserRoleAssignment from '../../src/models/UserRoleAssignment.js';
 import AuditLog from '../../src/models/AuditLog.js';
-import { ORGANIZATION_ADMIN_PERMISSIONS, ORGANIZATION_ADMIN_ROLE_NAME } from '../../src/config/constants.js';
+import {
+  DEPARTMENT_MANAGER_PERMISSIONS,
+  DEPARTMENT_MANAGER_ROLE_NAME,
+  DEPARTMENT_MEMBER_PERMISSIONS,
+  DEPARTMENT_MEMBER_ROLE_NAME,
+  ORGANIZATION_ADMIN_PERMISSIONS,
+  ORGANIZATION_ADMIN_ROLE_NAME,
+} from '../../src/config/constants.js';
 
 const authHeader = (token) => ({ Authorization: `Bearer ${token}` });
 
@@ -64,6 +71,24 @@ const createOrganizationContext = async (suffix = 'one') => {
     permissions: ORGANIZATION_ADMIN_PERMISSIONS,
     assignedBy: admin._id,
   });
+  await Role.create([
+    {
+      organizationId,
+      name: DEPARTMENT_MANAGER_ROLE_NAME,
+      roleType: 'DEPARTMENT_MANAGER',
+      permissions: DEPARTMENT_MANAGER_PERMISSIONS,
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    },
+    {
+      organizationId,
+      name: DEPARTMENT_MEMBER_ROLE_NAME,
+      roleType: 'EMPLOYEE',
+      permissions: DEPARTMENT_MEMBER_PERMISSIONS,
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    },
+  ]);
   const login = await loginRequest({ email: admin.email, password: TEST_PASSWORD });
   return { organizationId, admin, token: login.body.data.accessToken };
 };

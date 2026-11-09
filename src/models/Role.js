@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { PERMISSION_CATALOG } from '../config/constants.js';
+import { PERMISSION_CATALOG, ROLE_TYPES } from '../config/constants.js';
 
 const roleSchema = new mongoose.Schema(
   {
@@ -15,11 +15,20 @@ const roleSchema = new mongoose.Schema(
       minlength: 2,
       maxlength: 200,
     },
+    nameNormalized: {
+      type: String,
+      required: true,
+      select: false,
+    },
     description: {
       type: String,
       trim: true,
       maxlength: 1000,
       default: '',
+    },
+    roleType: {
+      type: String,
+      enum: ROLE_TYPES,
     },
     permissions: {
       type: [String],
@@ -46,7 +55,16 @@ const roleSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+roleSchema.set('autoIndex', false);
+
 roleSchema.index({ organizationId: 1, name: 1 }, { unique: true });
+
+roleSchema.pre('validate', function normalizeRoleName(next) {
+  if (this.name !== undefined) {
+    this.nameNormalized = this.name.trim().toLocaleLowerCase('en-US');
+  }
+  next();
+});
 
 const Role = mongoose.model('Role', roleSchema, 'roles');
 

@@ -15,6 +15,7 @@ import { ORGANIZATION_ADMIN_ROLE_NAME } from '../../config/constants.js';
 import { sendInitialSetupInstructions, issueAccountSetupToken, issuePasswordResetToken } from '../auth/password-reset.service.js';
 import { USER_SETUP_TOKEN_TTL_MS, USER_ACTIONS } from './user.constants.js';
 import { escapeRegex, getScopedDepartmentIds, toPublicUser } from './user.utils.js';
+import { getBuiltInRole, persistRoleAssignments, prepareRoleAssignments } from '../roles/role.assignment.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, userId, changes = {} }) => {
 	await AuditLog.create(
@@ -103,59 +104,6 @@ const mapDuplicateError = (error) => {
 	return error;
 };
 
-const assertCanAssignRole = (role, requestedAssignment, access) => {
-	const permissions = role.permissions || [];
-	const hasPermission = (permission) => {
-		if (access.organizationPermissions.has(permission)) return true;
-		return requestedAssignment.scopeType === 'DEPARTMENT' &&
-			getScopedDepartmentIds(access, permission).includes(String(requestedAssignment.departmentId));
-	};
-
-	if (permissions.some((permission) => !hasPermission(permission))) {
-		throw new AppError(
-			'You cannot assign a role with permissions beyond your own effective scope.',
-			403,
-			'ROLE_ASSIGNMENT_FORBIDDEN',
-			{ roleId: String(role._id) }
-		);
-	}
-};
-
-const validateRoleAssignments = async ({ assignments, organizationId, access, session }) => {
-	if (assignments.length === 0) return [];
-	const roleIds = [...new Set(assignments.map((item) => item.roleId))].map(
-		(id) => new mongoose.Types.ObjectId(id)
-	);
-	const roleQuery = Role.find({ _id: { $in: roleIds }, organizationId, status: 'ACTIVE' });
-	if (session) roleQuery.session(session);
-	const roles = await roleQuery;
-	const rolesById = new Map(roles.map((role) => [String(role._id), role]));
-	if (rolesById.size !== roleIds.length) {
-		throw new AppError('Every role must exist, be active, and belong to this organization.', 400, 'INVALID_ROLE_ASSIGNMENT');
-	}
-
-	for (const assignment of assignments) {
-		const role = rolesById.get(String(assignment.roleId));
-		assertCanAssignRole(role, assignment, access);
-		if (assignment.scopeType === 'DEPARTMENT') {
-			const departmentQuery = Department.findOne({
-				_id: assignment.departmentId,
-				organizationId,
-				status: 'ACTIVE',
-			}).select('_id');
-			if (session) departmentQuery.session(session);
-			if (!(await departmentQuery)) {
-				throw new AppError('Role assignment department must be active and belong to this organization.', 400, 'INVALID_ROLE_ASSIGNMENT');
-			}
-		}
-	}
-	return assignments.map((assignment) => ({
-		...assignment,
-		roleId: new mongoose.Types.ObjectId(assignment.roleId),
-		departmentId: assignment.departmentId ? new mongoose.Types.ObjectId(assignment.departmentId) : null,
-	}));
-};
-
 const getUserInOrganization = async ({ userId, organizationId, session }) => {
 	let query = User.findOne({ _id: userId, 'organizationMemberships.organizationId': organizationId })
 		.select('name email accountStatus passwordSetupRequired organizationMemberships createdAt updatedAt');
@@ -186,8 +134,24 @@ export const createUser = async ({ organizationId, actorId, access, input }) => 
 		result = await withTransaction(async (session) => {
 			const organization = await assertActiveOrganization(organizationId, session);
 			await ensureDepartmentIsActive({ departmentId: input.departmentId, organizationId, session });
-			const roleAssignments = await validateRoleAssignments({
-				assignments: input.roleAssignments,
+			let requestedAssignments = [...input.roleAssignments];
+			if (input.departmentId) {
+				const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
+				const alreadyRequested = requestedAssignments.some(
+					(assignment) => String(assignment.roleId) === String(memberRole._id) &&
+						assignment.scopeType === 'DEPARTMENT' &&
+						String(assignment.departmentId) === String(input.departmentId)
+				);
+				if (!alreadyRequested) {
+					requestedAssignments.push({
+						roleId: memberRole._id,
+						scopeType: 'DEPARTMENT',
+						departmentId: input.departmentId,
+					});
+				}
+			}
+			const roleAssignments = await prepareRoleAssignments({
+				assignments: requestedAssignments,
 				organizationId,
 				access,
 				session,
@@ -214,19 +178,13 @@ export const createUser = async ({ organizationId, actorId, access, input }) => 
 			);
 
 			if (roleAssignments.length) {
-				await UserRoleAssignment.create(
-					roleAssignments.map((assignment) => ({
-						userId: user._id,
-						roleId: assignment.roleId,
-						organizationId,
-						departmentId: assignment.departmentId,
-						scopeType: assignment.scopeType,
-						status: 'ACTIVE',
-						assignedBy: actorId,
-						assignedAt: new Date(),
-					})),
-					{ session }
-				);
+				await persistRoleAssignments({
+					assignments: roleAssignments,
+					userId: user._id,
+					organizationId,
+					actorId,
+					session,
+				});
 			}
 
 			await writeAuditLog(session, {
@@ -451,6 +409,37 @@ export const assignUserDepartment = async ({ userId, organizationId, actorId, ac
 
 		membership.departmentId = departmentId;
 		await user.save({ session });
+		const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
+		if (previousDepartmentId) {
+			const previousAssignment = await UserRoleAssignment.findOne({
+				userId: user._id,
+				organizationId,
+				roleId: memberRole._id,
+				scopeType: 'DEPARTMENT',
+				departmentId: previousDepartmentId,
+				status: 'ACTIVE',
+			}).session(session);
+			if (previousAssignment) {
+				previousAssignment.status = 'INACTIVE';
+				await previousAssignment.save({ session });
+			}
+		}
+		if (departmentId) {
+			const prepared = await prepareRoleAssignments({
+				assignments: [{ roleId: memberRole._id, scopeType: 'DEPARTMENT', departmentId }],
+				organizationId,
+				access,
+				session,
+				userId: user._id,
+			});
+			await persistRoleAssignments({
+				assignments: prepared,
+				userId: user._id,
+				organizationId,
+				actorId,
+				session,
+			});
+		}
 		await writeAuditLog(session, {
 			organizationId,
 			actorId,
@@ -461,15 +450,22 @@ export const assignUserDepartment = async ({ userId, organizationId, actorId, ac
 		return makePublicProfile(user, organizationId, membership);
 	});
 
-const countActiveOrganizationAdmins = async ({ organizationId, session }) => {
-	const roleQuery = Role.findOne({ organizationId, name: ORGANIZATION_ADMIN_ROLE_NAME }).select('_id');
+const getOrganizationAdminRoleIds = async ({ organizationId, session }) => {
+	const roleQuery = Role.find({ organizationId }).select('_id name roleType');
 	if (session) roleQuery.session(session);
-	const role = await roleQuery;
-	if (!role) return 0;
+	const roles = await roleQuery;
+	return roles
+		.filter((role) => role.roleType === 'ORGANIZATION_ADMIN' || role.name === ORGANIZATION_ADMIN_ROLE_NAME)
+		.map((role) => role._id);
+};
+
+const countActiveOrganizationAdmins = async ({ organizationId, session }) => {
+	const adminRoleIds = await getOrganizationAdminRoleIds({ organizationId, session });
+	if (adminRoleIds.length === 0) return 0;
 
 	const assignmentQuery = UserRoleAssignment.find({
 		organizationId,
-		roleId: role._id,
+		roleId: { $in: adminRoleIds },
 		scopeType: 'ORGANIZATION',
 		departmentId: null,
 		status: 'ACTIVE',
@@ -522,13 +518,11 @@ export const deactivateUser = async ({ userId, organizationId, actorId, access }
 		const membership = assertUserScope(user, organizationId, access, 'users.deactivate');
 		if (membership.status === 'INACTIVE') return makePublicProfile(user, organizationId, membership);
 
-		const organizationAdminRole = await Role.findOne({ organizationId, name: ORGANIZATION_ADMIN_ROLE_NAME })
-			.select('_id')
-			.session(session);
-		if (organizationAdminRole) {
+		const organizationAdminRoleIds = await getOrganizationAdminRoleIds({ organizationId, session });
+		if (organizationAdminRoleIds.length) {
 			const isOrganizationAdmin = await UserRoleAssignment.exists({
 				userId: user._id,
-				roleId: organizationAdminRole._id,
+				roleId: { $in: organizationAdminRoleIds },
 				organizationId,
 				scopeType: 'ORGANIZATION',
 				departmentId: null,

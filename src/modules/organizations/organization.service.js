@@ -13,6 +13,10 @@ import {
   AUDIT_RESOURCE_TYPES,
   ORGANIZATION_ADMIN_PERMISSIONS,
   ORGANIZATION_ADMIN_ROLE_NAME,
+  DEPARTMENT_MANAGER_PERMISSIONS,
+  DEPARTMENT_MANAGER_ROLE_NAME,
+  DEPARTMENT_MEMBER_PERMISSIONS,
+  DEPARTMENT_MEMBER_ROLE_NAME,
 } from '../../config/constants.js';
 import { escapeRegex, toPublicAdminUser, toPublicOrganization } from './organization.utils.js';
 
@@ -33,30 +37,18 @@ const writeAuditLog = async (session, payload) => {
   );
 };
 
-const ensureOrganizationAdminRole = async ({ session, organizationId, actorId }) => {
-  const existing = await Role.findOne({
+const ensureBuiltInRole = async ({ session, organizationId, actorId, name, roleType, permissions, description }) => {
+  const existing = await Role.findOne({ organizationId, roleType }).session(session);
+  if (existing) return existing;
+  const [role] = await Role.create([{
     organizationId,
-    name: ORGANIZATION_ADMIN_ROLE_NAME,
-  }).session(session);
-
-  if (existing) {
-    return existing;
-  }
-
-  const [role] = await Role.create(
-    [
-      {
-        organizationId,
-        name: ORGANIZATION_ADMIN_ROLE_NAME,
-        description: 'Default organization administrator role.',
-        permissions: ORGANIZATION_ADMIN_PERMISSIONS,
-        status: 'ACTIVE',
-        createdBy: actorId,
-      },
-    ],
-    { session }
-  );
-
+    name,
+    roleType,
+    description,
+    permissions,
+    status: 'ACTIVE',
+    createdBy: actorId,
+  }], { session });
   return role;
 };
 
@@ -116,10 +108,23 @@ export const createOrganization = async ({ name, admin, actorId }) => {
         { session }
       );
 
-      const adminRole = await ensureOrganizationAdminRole({
-        session,
-        organizationId: organization._id,
-        actorId,
+      const adminRole = await ensureBuiltInRole({
+        session, organizationId: organization._id, actorId,
+        name: ORGANIZATION_ADMIN_ROLE_NAME, roleType: 'ORGANIZATION_ADMIN',
+        permissions: ORGANIZATION_ADMIN_PERMISSIONS,
+        description: 'Default organization administrator role.',
+      });
+      await ensureBuiltInRole({
+        session, organizationId: organization._id, actorId,
+        name: DEPARTMENT_MANAGER_ROLE_NAME, roleType: 'DEPARTMENT_MANAGER',
+        permissions: DEPARTMENT_MANAGER_PERMISSIONS,
+        description: 'Default department manager role.',
+      });
+      await ensureBuiltInRole({
+        session, organizationId: organization._id, actorId,
+        name: DEPARTMENT_MEMBER_ROLE_NAME, roleType: 'EMPLOYEE',
+        permissions: DEPARTMENT_MEMBER_PERMISSIONS,
+        description: 'Default department member role.',
       });
 
       await UserRoleAssignment.create(

@@ -1,5 +1,5 @@
-import UserRoleAssignment from '../../models/UserRoleAssignment.js';
 import { AppError } from '../../utils/AppError.js';
+import { resolveEffectivePermissions } from '../../services/authorization/permission.service.js';
 
 export const loadDepartmentPermissions = async (req, res, next) => {
   try {
@@ -12,48 +12,7 @@ export const loadDepartmentPermissions = async (req, res, next) => {
       );
     }
 
-    const assignments = await UserRoleAssignment.find({
-      userId,
-      organizationId,
-      status: 'ACTIVE',
-    })
-      .populate({ path: 'roleId', select: 'organizationId status permissions' })
-      .lean();
-
-    const organizationPermissions = new Set();
-    const scopedPermissions = new Map();
-
-    for (const assignment of assignments) {
-      const role = assignment.roleId;
-      if (
-        !role ||
-        role.status !== 'ACTIVE' ||
-        String(role.organizationId) !== String(organizationId)
-      ) {
-        continue;
-      }
-
-      if (assignment.scopeType === 'ORGANIZATION' && !assignment.departmentId) {
-        for (const permission of role.permissions || []) {
-          organizationPermissions.add(permission);
-        }
-        continue;
-      }
-
-      if (assignment.scopeType !== 'DEPARTMENT' || !assignment.departmentId) {
-        continue;
-      }
-
-      const departmentId = String(assignment.departmentId);
-      for (const permission of role.permissions || []) {
-        if (!scopedPermissions.has(permission)) {
-          scopedPermissions.set(permission, new Set());
-        }
-        scopedPermissions.get(permission).add(departmentId);
-      }
-    }
-
-    req.departmentAccess = { organizationPermissions, scopedPermissions };
+    req.departmentAccess = await resolveEffectivePermissions({ userId, organizationId });
     return next();
   } catch (error) {
     return next(error);
