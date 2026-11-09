@@ -208,6 +208,91 @@ Organization names and admin emails must be unique. Deactivated organizations re
 
 ---
 
+## Department management
+
+Departments belong to the authenticated organization. The existing `departments` collection stores manager IDs; employee assignments are stored in the matching embedded `users.organizationMemberships` entry. No membership collection is used. A user can have only one department per organization, and removing a user from a department clears only that membership's `departmentId`.
+
+All endpoints require a Bearer access token with an active organization context. Access is derived from active `userRoleAssignments` and active roles in the same organization. Organization-scoped permissions apply across that organization; department-scoped permissions apply only to their assigned department. Super Admin status by itself does not grant department access.
+
+Base path: `/api/departments`
+
+| Method | Path | Purpose | Required permission |
+|---|---|---|---|
+| `POST` | `/api/departments` | Create a department | Organization-scoped `departments.create` |
+| `GET` | `/api/departments` | List departments | `departments.view` |
+| `GET` | `/api/departments/:departmentId` | Get department details | `departments.view` |
+| `PATCH` | `/api/departments/:departmentId` | Update name or description | `departments.edit` |
+| `PATCH` | `/api/departments/:departmentId/managers` | Replace the full manager list | `departments.edit` |
+| `POST` | `/api/departments/:departmentId/members` | Add organization members | `departments.edit` |
+| `DELETE` | `/api/departments/:departmentId/members/:userId` | Remove a member from the department | `departments.edit` |
+| `PATCH` | `/api/departments/:departmentId/activate` | Activate a department | `departments.edit` |
+| `PATCH` | `/api/departments/:departmentId/deactivate` | Deactivate a department | `departments.edit` |
+
+Create request:
+
+```json
+{
+  "name": "Engineering",
+  "description": "Software development and engineering department"
+}
+```
+
+Manager replacement request (an empty array removes all managers):
+
+```json
+{
+  "managerIds": ["USER_OBJECT_ID_1", "USER_OBJECT_ID_2"]
+}
+```
+
+Member addition request:
+
+```json
+{
+  "userIds": ["USER_OBJECT_ID_1", "USER_OBJECT_ID_2"]
+}
+```
+
+Example create response:
+
+```json
+{
+  "success": true,
+  "message": "Department created successfully.",
+  "data": {
+    "id": "DEPARTMENT_OBJECT_ID",
+    "organizationId": "ORGANIZATION_OBJECT_ID",
+    "name": "Engineering",
+    "description": "Software development and engineering department",
+    "status": "ACTIVE",
+    "managerCount": 0,
+    "memberCount": 0,
+    "createdAt": "2026-11-03T00:00:00.000Z",
+    "updatedAt": "2026-11-03T00:00:00.000Z"
+  }
+}
+```
+
+List query parameters are `page`, `limit` (maximum 100), `search` (name), `status` (`ACTIVE` or `INACTIVE`), `sortBy` (`name`, `description`, `status`, `createdAt`, or `updatedAt`), and `sortOrder` (`asc` or `desc`). Responses include `data.items` and `data.pagination`; department items include manager and active-membership counts. Detail responses include safe manager/member profiles and counts, never password hashes.
+
+Managers must be active users with an active organization membership and an existing active role assignment granting the existing `departments.edit` permission either organization-wide or for this department. Assignment does not create or broaden a role. There is no dedicated Department Manager role or permission in the current catalog; provisioning such a role remains a Role Management responsibility. Manager updates replace the complete `managerIds` list and are audited per added/removed manager.
+
+Member additions require active users with an active membership in this organization. Users already assigned to another department receive `409 MEMBER_IN_ANOTHER_DEPARTMENT`; they must be explicitly removed from that department before being added here. Department deactivation retains manager and member references, but prevents new manager/member assignments and department edits. All department writes require an active parent organization. Multi-document writes and their audit records are committed together using MongoDB transactions.
+
+Successful responses use `{ "success": true, "message": "...", "data": ... }`. Errors use `{ "success": false, "message": "...", "code": "..." }`. Common statuses are `400` for invalid input, `401` for missing/invalid authentication, `403` for missing permissions or inactive organization/department, `404` for a department outside the caller's organization or a missing resource, and `409` for duplicate names or conflicting assignments. Audit actions are `DEPARTMENT_CREATED`, `DEPARTMENT_UPDATED`, `DEPARTMENT_MANAGER_ASSIGNED`, `DEPARTMENT_MANAGER_REMOVED`, `DEPARTMENT_MEMBER_ADDED`, `DEPARTMENT_MEMBER_REMOVED`, `DEPARTMENT_ACTIVATED`, and `DEPARTMENT_DEACTIVATED`.
+
+Example error response:
+
+```json
+{
+  "success": false,
+  "message": "A department with this name already exists in the organization.",
+  "code": "DEPARTMENT_NAME_EXISTS"
+}
+```
+
+---
+
 ## Postman testing
 
 1. Seed Super Admin and start the server.
