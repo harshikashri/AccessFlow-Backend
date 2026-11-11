@@ -1,6 +1,11 @@
+import { inject } from 'vitest';
+
 process.env.NODE_ENV = 'test';
 process.env.PORT = process.env.PORT || '5000';
-process.env.MONGODB_URI = 'mongodb://127.0.0.1:27018/accessflow_test?directConnection=true';
+process.env.MONGODB_URI = inject('accessflowMongoUri');
+if (!process.env.MONGODB_URI) {
+  throw new Error('The isolated MongoDB replica set was not provided to the test environment.');
+}
 process.env.JWT_ACCESS_SECRET =
   process.env.JWT_ACCESS_SECRET || 'test_access_secret_please_change_32';
 process.env.JWT_REFRESH_SECRET =

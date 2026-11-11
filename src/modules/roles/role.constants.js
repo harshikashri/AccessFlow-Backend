@@ -2,7 +2,7 @@ import { ROLE_TYPES } from '../../config/constants.js';
 
 export { ROLE_TYPES };
 export const CREATABLE_ROLE_TYPES = ['CUSTOM'];
-export const BUILT_IN_ROLE_TYPES = ['ORGANIZATION_ADMIN', 'DEPARTMENT_MANAGER', 'EMPLOYEE'];
+export const BUILT_IN_ROLE_TYPES = ['ORGANIZATION_ADMIN', 'DEPARTMENT_MANAGER', 'EMPLOYEE', 'FINANCE_APPROVER'];
 export const PROTECTED_ROLE_TYPES = ['ORGANIZATION_ADMIN', 'EMPLOYEE'];
 export const ROLE_NAME_MIN = 2;
 export const ROLE_NAME_MAX = 200;

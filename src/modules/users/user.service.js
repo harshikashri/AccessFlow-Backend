@@ -141,18 +141,26 @@ export const createUser = async ({ organizationId, actorId, access, input }) => 
 			await ensureDepartmentIsActive({ departmentId: input.departmentId, organizationId, session });
 			let requestedAssignments = [...input.roleAssignments];
 			if (input.departmentId) {
-				const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
-				const alreadyRequested = requestedAssignments.some(
-					(assignment) => String(assignment.roleId) === String(memberRole._id) &&
-						assignment.scopeType === 'DEPARTMENT' &&
-						String(assignment.departmentId) === String(input.departmentId)
-				);
-				if (!alreadyRequested) {
-					requestedAssignments.push({
-						roleId: memberRole._id,
-						scopeType: 'DEPARTMENT',
-						departmentId: input.departmentId,
-					});
+				const requestedRoleIds = requestedAssignments.map((assignment) => assignment.roleId);
+				const managerRoleRequested = requestedRoleIds.length > 0 && await Role.exists({
+					_id: { $in: requestedRoleIds },
+					organizationId,
+					roleType: 'DEPARTMENT_MANAGER',
+				}).session(session);
+				if (!managerRoleRequested) {
+					const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
+					const alreadyRequested = requestedAssignments.some(
+						(assignment) => String(assignment.roleId) === String(memberRole._id) &&
+							assignment.scopeType === 'DEPARTMENT' &&
+							String(assignment.departmentId) === String(input.departmentId)
+					);
+					if (!alreadyRequested) {
+						requestedAssignments.push({
+							roleId: memberRole._id,
+							scopeType: 'DEPARTMENT',
+							departmentId: input.departmentId,
+						});
+					}
 				}
 			}
 			const roleAssignments = await prepareRoleAssignments({

@@ -10,12 +10,26 @@ import { assertRoleCompatibility, getRoleType } from './role-compatibility.js';
 const assertCanAssignRole = (role, requestedAssignment, access) => {
   if (!access) return;
 
-  const permissions = role.permissions || [];
   const hasPermission = (permission) =>
     access.organizationPermissions.has(permission) ||
     (requestedAssignment.scopeType === 'DEPARTMENT' &&
       getScopedDepartmentIds(access, permission).includes(String(requestedAssignment.departmentId)));
 
+  const roleType = getRoleType(role);
+  if (roleType === 'EMPLOYEE' || roleType === 'DEPARTMENT_MANAGER') {
+    const allowedPermissions = roleType === 'EMPLOYEE'
+      ? ['roles.edit', 'users.create', 'users.edit']
+      : ['roles.edit'];
+    if (allowedPermissions.some(hasPermission)) return;
+    throw new AppError(
+      'You are not authorized to assign this built-in role.',
+      403,
+      'ROLE_ASSIGNMENT_FORBIDDEN',
+      { roleId: String(role._id) }
+    );
+  }
+
+  const permissions = role.permissions || [];
   if (permissions.some((permission) => !hasPermission(permission))) {
     throw new AppError(
       'You cannot assign a role with permissions beyond your own effective scope.',
@@ -228,9 +242,69 @@ export const ensureEmployeeDepartmentAssignment = async ({
   return created;
 };
 
+export const ensureDepartmentManagerAssignment = async ({
+  userId,
+  organizationId,
+  departmentId,
+  role,
+  actorId,
+  access,
+  session,
+}) => {
+  if (getRoleType(role) !== 'DEPARTMENT_MANAGER') {
+    throw new AppError(
+      'Only the built-in Department Manager role can be ensured through department manager registration.',
+      400,
+      'INVALID_DEPARTMENT_MANAGER_ROLE'
+    );
+  }
+
+  const organizationScopedAssignment = await UserRoleAssignment.findOne({
+    userId,
+    organizationId,
+    roleId: role._id,
+    scopeType: 'ORGANIZATION',
+    status: 'ACTIVE',
+  }).session(session);
+  if (organizationScopedAssignment) {
+    throw new AppError(
+      'Department Manager roles must be assigned at department scope.',
+      400,
+      'INVALID_ROLE_SCOPE'
+    );
+  }
+
+  const prepared = await prepareRoleAssignments({
+    assignments: [{ roleId: role._id, scopeType: 'DEPARTMENT', departmentId }],
+    organizationId,
+    access,
+    session,
+    userId,
+  });
+  const existing = await UserRoleAssignment.findOne({
+    userId,
+    organizationId,
+    roleId: role._id,
+    scopeType: 'DEPARTMENT',
+    departmentId,
+    status: 'ACTIVE',
+  }).session(session);
+  if (existing) return { assignment: existing, created: false };
+
+  const [assignment] = await persistRoleAssignments({
+    assignments: prepared,
+    userId,
+    organizationId,
+    actorId,
+    session,
+  });
+  return { assignment, created: true };
+};
+
 export default {
   getBuiltInRole,
   prepareRoleAssignments,
   persistRoleAssignments,
   ensureEmployeeDepartmentAssignment,
+  ensureDepartmentManagerAssignment,
 };

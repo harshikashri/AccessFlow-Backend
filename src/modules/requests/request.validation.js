@@ -7,6 +7,7 @@ import {
   REQUEST_DESCRIPTION_MAX,
   REQUEST_PAGE_SIZE_DEFAULT,
   REQUEST_PAGE_SIZE_MAX,
+  REQUEST_DERIVED_FILTERS,
   REQUEST_SORT_FIELDS,
   REQUEST_TITLE_MAX,
   REQUEST_TYPE_CODE_MAX,
@@ -237,7 +238,11 @@ export const validateRequestId = (value) => validateId(value, 'requestId');
 
 export const validateRequestListQuery = (query) => {
   requireObject(query, 'Query parameters');
-  const allowed = ['page', 'limit', 'search', 'status', 'requestTypeId', 'departmentId', 'priority', 'from', 'to', 'sortBy', 'sortOrder'];
+  const allowed = [
+    'page', 'limit', 'search', 'status', 'requestTypeId', 'departmentId', 'requesterId',
+    'priority', 'approvalStage', 'derivedFilter', 'from', 'to', 'fromDate', 'toDate',
+    'sortBy', 'sortOrder',
+  ];
   const unknown = Object.keys(query).filter((key) => !allowed.includes(key));
   if (unknown.length) fail('Unknown query parameters are not allowed.', unknown);
   const parseInteger = (value, fallback, max) => {
@@ -249,26 +254,39 @@ export const validateRequestListQuery = (query) => {
   };
   const page = parseInteger(query.page, 1, Number.MAX_SAFE_INTEGER);
   const limit = parseInteger(query.limit, REQUEST_PAGE_SIZE_DEFAULT, REQUEST_PAGE_SIZE_MAX);
-  if (query.status !== undefined && !['DRAFT', 'SUBMITTED', 'CANCELLED'].includes(query.status)) fail('Invalid request status.');
+  if (query.status !== undefined && !['ALL', 'DRAFT', 'SUBMITTED', 'PENDING_APPROVAL', 'RETURNED', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(query.status)) fail('Invalid request status.');
   if (query.priority !== undefined && !REQUEST_PRIORITIES.includes(query.priority)) fail('Invalid request priority.');
   const requestTypeId = query.requestTypeId ? validateId(query.requestTypeId, 'requestTypeId') : undefined;
   const departmentId = query.departmentId ? validateId(query.departmentId, 'departmentId') : undefined;
+  const requesterId = query.requesterId ? validateId(query.requesterId, 'requesterId') : undefined;
+  const approvalStage = query.approvalStage === undefined ? undefined : stringValue(query.approvalStage, 'approvalStage', 1, 100);
+  const derivedFilter = query.derivedFilter;
+  if (derivedFilter !== undefined && !REQUEST_DERIVED_FILTERS.includes(derivedFilter)) fail('Invalid derivedFilter.');
   const sortBy = query.sortBy || 'createdAt';
   if (!REQUEST_SORT_FIELDS.includes(sortBy)) fail('Invalid sortBy field.');
   const sortOrder = (query.sortOrder || 'desc').toLowerCase();
   if (!['asc', 'desc'].includes(sortOrder)) fail('sortOrder must be asc or desc.');
-  for (const [name, value] of [['from', query.from], ['to', query.to]]) {
+  const from = query.fromDate || query.from;
+  const to = query.toDate || query.to;
+  if (query.fromDate && query.from && query.fromDate !== query.from) fail('Use either fromDate or from, not conflicting values.');
+  if (query.toDate && query.to && query.toDate !== query.to) fail('Use either toDate or to, not conflicting values.');
+  for (const [name, value] of [['fromDate', from], ['toDate', to]]) {
     if (value !== undefined && (typeof value !== 'string' || Number.isNaN(Date.parse(value)))) {
       fail(`${name} must be a valid date.`);
     }
   }
-  if (query.from && query.to && new Date(query.from) > new Date(query.to)) fail('from must be before to.');
-  return { page, limit, search: query.search?.trim() || '', status: query.status, requestTypeId, departmentId, priority: query.priority, from: query.from, to: query.to, sortBy, sortOrder };
+  if (from && to && new Date(from) > new Date(to)) fail('fromDate must be before toDate.');
+  const search = query.search === undefined ? '' : stringValue(query.search, 'search', 0, 200);
+  return {
+    page, limit, search, status: query.status === 'ALL' ? undefined : query.status,
+    requestTypeId, departmentId, requesterId, priority: query.priority, approvalStage, derivedFilter,
+    from, to, sortBy, sortOrder,
+  };
 };
 
 export const validateRequestSearchQuery = (query) => {
   requireObject(query, 'Query parameters');
-  const allowed = ['category', 'departmentId', 'userId', 'status', 'page', 'limit', 'sortBy', 'sortOrder'];
+  const allowed = ['category', 'departmentId', 'userId', 'status', 'page', 'limit', 'sortBy', 'sortOrder', 'search'];
   const unknown = Object.keys(query).filter((key) => !allowed.includes(key));
   if (unknown.length) fail('Unknown query parameters are not allowed.', unknown);
   const parseInteger = (value, fallback, max) => {
@@ -280,7 +298,7 @@ export const validateRequestSearchQuery = (query) => {
   };
   const page = parseInteger(query.page, 1, Number.MAX_SAFE_INTEGER);
   const limit = parseInteger(query.limit, REQUEST_PAGE_SIZE_DEFAULT, REQUEST_PAGE_SIZE_MAX);
-  if (query.status !== undefined && !['DRAFT', 'SUBMITTED', 'CANCELLED'].includes(query.status)) fail('Invalid request status.');
+  if (query.status !== undefined && !['ALL', 'DRAFT', 'SUBMITTED', 'PENDING_APPROVAL', 'RETURNED', 'APPROVED', 'REJECTED', 'CANCELLED'].includes(query.status)) fail('Invalid request status.');
   const category = query.category ? validateId(query.category, 'category') : undefined;
   const departmentId = query.departmentId ? validateId(query.departmentId, 'departmentId') : undefined;
   const userId = query.userId ? validateId(query.userId, 'userId') : undefined;
@@ -288,5 +306,6 @@ export const validateRequestSearchQuery = (query) => {
   if (!REQUEST_SORT_FIELDS.includes(sortBy)) fail('Invalid sortBy field.');
   const sortOrder = (query.sortOrder || 'desc').toLowerCase();
   if (!['asc', 'desc'].includes(sortOrder)) fail('sortOrder must be asc or desc.');
-  return { page, limit, requestTypeId: category, departmentId, userId, status: query.status, sortBy, sortOrder };
+  const search = query.search === undefined ? '' : stringValue(query.search, 'search', 0, 200);
+  return { page, limit, requestTypeId: category, departmentId, userId, status: query.status === 'ALL' ? undefined : query.status, sortBy, sortOrder, search };
 };

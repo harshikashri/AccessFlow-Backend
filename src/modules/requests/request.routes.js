@@ -13,6 +13,9 @@ router.get('/', asyncHandler(requestController.listRequests));
 router.get('/:requestId', asyncHandler(requestController.getRequest));
 router.patch('/:requestId', asyncHandler(requestController.updateRequest));
 router.post('/:requestId/submit', asyncHandler(requestController.submitRequest));
+router.post('/:requestId/resubmit', asyncHandler(requestController.resubmitRequest));
 router.post('/:requestId/cancel', asyncHandler(requestController.cancelRequest));
+router.get('/:requestId/approval-progress', asyncHandler(requestController.getApprovalProgress));
+router.get('/:requestId/approval-history', asyncHandler(requestController.getApprovalHistory));
 
 export default router;

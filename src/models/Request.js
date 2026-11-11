@@ -115,6 +115,21 @@ const requestSchema = new mongoose.Schema(
       maxlength: 1000,
       default: null,
     },
+    returnedAt: {
+      type: Date,
+      default: null,
+    },
+    returnedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    returnReason: {
+      type: String,
+      trim: true,
+      maxlength: 2000,
+      default: null,
+    },
   },
   { timestamps: true }
 );

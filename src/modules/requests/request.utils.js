@@ -40,6 +40,9 @@ export const toPublicRequest = (request) => ({
   cancelledAt: request.cancelledAt,
   cancelledBy: request.cancelledBy ? String(request.cancelledBy) : null,
   cancellationReason: request.cancellationReason,
+  returnedAt: request.returnedAt,
+  returnedBy: request.returnedBy ? String(request.returnedBy) : null,
+  returnReason: request.returnReason,
   createdAt: request.createdAt,
   updatedAt: request.updatedAt,
 });

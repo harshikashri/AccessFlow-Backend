@@ -1,6 +1,6 @@
 import { PERMISSION_CATALOG, PERMISSION_MODULES } from './permissionCatalog.js';
 
-export const REQUEST_TYPES = ['PURCHASE', 'LEAVE', 'ACCESS', 'GENERAL'];
+export const REQUEST_TYPES = ['PURCHASE', 'LEAVE', 'ACCESS', 'RESOURCE', 'GENERAL'];
 
 export const REQUEST_STATUSES = [
   'DRAFT',
@@ -18,12 +18,12 @@ export const REQUEST_FIELD_TYPES = ['TEXT', 'TEXTAREA', 'NUMBER', 'DATE', 'SELEC
 
 export const ENTITY_STATUS = ['ACTIVE', 'INACTIVE'];
 
-export const APPROVER_TYPES = ['DEPARTMENT_MANAGER', 'ROLE', 'USER'];
+export const APPROVER_TYPES = ['DEPARTMENT_MANAGER', 'ROLE', 'USER', 'ORGANIZATION_ADMIN'];
 
-export const APPROVAL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED', 'RETURNED', 'SKIPPED'];
+export const APPROVAL_STATUSES = ['PENDING', 'ACTIVE', 'CLAIMED', 'APPROVED', 'REJECTED', 'RETURNED', 'SKIPPED', 'CANCELLED'];
 
 export const SCOPE_TYPES = ['ORGANIZATION', 'DEPARTMENT'];
-export const ROLE_TYPES = ['ORGANIZATION_ADMIN', 'DEPARTMENT_MANAGER', 'EMPLOYEE', 'CUSTOM'];
+export const ROLE_TYPES = ['ORGANIZATION_ADMIN', 'DEPARTMENT_MANAGER', 'EMPLOYEE', 'FINANCE_APPROVER', 'CUSTOM'];
 
 export const CONDITIONAL_OPERATORS = ['GREATER_THAN', 'LESS_THAN', 'EQUALS'];
 
@@ -45,6 +45,7 @@ export const DEPARTMENT_MANAGER_PERMISSIONS = [
   'departments.view',
   'departments.edit',
   'requests.view',
+  'requests.approve',
   'dashboard.view',
 ];
 export const DEPARTMENT_MEMBER_PERMISSIONS = [

@@ -291,6 +291,71 @@ describe('Dynamic Role Management', () => {
     expect(admin).toBeTruthy();
   });
 
+  it('allows authorized admins to assign built-in member and manager roles without weakening custom-role scope', async () => {
+    const local = await createOrganizationContext('built-in-assignment');
+    const foreign = await createOrganizationContext('built-in-assignment-foreign');
+    const department = await Department.create({
+      organizationId: local.organizationId,
+      name: 'Built-in Assignment Department',
+    });
+    const member = await createActiveMember({
+      organizationId: local.organizationId,
+      email: 'built-in-member-target@example.com',
+      departmentId: department._id,
+    });
+    const manager = await createActiveMember({
+      organizationId: local.organizationId,
+      email: 'built-in-manager-target@example.com',
+      departmentId: department._id,
+    });
+    const customTarget = await createActiveMember({
+      organizationId: local.organizationId,
+      email: 'custom-role-target@example.com',
+    });
+    const foreignUser = await createActiveMember({
+      organizationId: foreign.organizationId,
+      email: 'foreign-built-in-target@example.com',
+    });
+    await Role.updateOne(
+      { _id: local.adminRole._id },
+      { $set: { permissions: ['users.create', 'users.edit', 'roles.view', 'roles.create', 'roles.edit'] } }
+    );
+
+    const memberRole = await Role.findOne({ organizationId: local.organizationId, roleType: 'EMPLOYEE' });
+    const managerRole = await Role.findOne({ organizationId: local.organizationId, roleType: 'DEPARTMENT_MANAGER' });
+    const memberAssignment = await assignRole(local.token, String(memberRole._id), {
+      userId: String(member._id),
+      scopeType: 'DEPARTMENT',
+      departmentId: String(department._id),
+    });
+    const managerAssignment = await assignRole(local.token, String(managerRole._id), {
+      userId: String(manager._id),
+      scopeType: 'DEPARTMENT',
+      departmentId: String(department._id),
+    });
+    expect(memberAssignment.status).toBe(201);
+    expect(managerAssignment.status).toBe(201);
+
+    const elevatedCustomRole = await createRole(local.token, {
+      name: 'Out of Scope Custom Role',
+      permissions: ['users.deactivate'],
+    });
+    const customAssignment = await assignRole(local.token, elevatedCustomRole.body.data.id, {
+      userId: String(customTarget._id),
+      scopeType: 'ORGANIZATION',
+    });
+    expect(customAssignment.status).toBe(403);
+    expect(customAssignment.body.code).toBe('ROLE_ASSIGNMENT_FORBIDDEN');
+
+    const crossOrganization = await assignRole(local.token, String(memberRole._id), {
+      userId: String(foreignUser._id),
+      scopeType: 'DEPARTMENT',
+      departmentId: String(department._id),
+    });
+    expect(crossOrganization.status).toBe(400);
+    expect(crossOrganization.body.code).toBe('INVALID_ROLE_USER');
+  });
+
   it('enforces department role scope and validates users, departments, and organizations', async () => {
     const local = await createOrganizationContext('scope-local');
     const foreign = await createOrganizationContext('scope-foreign');

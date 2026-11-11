@@ -21,6 +21,7 @@ import {
 import { escapeRegex, toPublicAdminUser, toPublicOrganization } from './organization.utils.js';
 import WorkflowDefinition from '../../models/WorkflowDefinition.js';
 import { DEFAULT_REQUEST_TYPES } from '../requests/requestType.defaults.js';
+import { initializeDefaultApprovalWorkflow } from '../requests/approvalWorkflow.service.js';
 
 const writeAuditLog = async (session, payload) => {
   await AuditLog.create(
@@ -167,6 +168,7 @@ export const createOrganization = async ({ name, admin, actorId }) => {
         { session }
       );
       await ensureDefaultRequestTypes({ session, organizationId: organization._id, actorId: adminUser._id });
+      await initializeDefaultApprovalWorkflow({ session, organizationId: organization._id, actorId: adminUser._id });
 
       await writeAuditLog(session, {
         organizationId: organization._id,
