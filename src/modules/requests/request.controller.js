@@ -1,5 +1,10 @@
 import * as requestService from './request.service.js';
 import {
+  notifyRequestCancellation,
+  notifyRequestSubmission,
+  runApprovalNotificationSafely,
+} from '../../services/email/approvalLifecycle.service.js';
+import {
   validateCancellation,
   validateCreateRequest,
   validateRequestId,
@@ -67,7 +72,47 @@ export const submitRequest = async (req, res) => {
     access: req.requestAccess,
     requestId: validateRequestId(req.params.requestId),
   });
+  await runApprovalNotificationSafely(() => notifyRequestSubmission({
+    organizationId: req.auth.organizationId,
+    requestId: data.id,
+    event: 'request_submitted',
+  }));
   return res.status(200).json({ success: true, message: 'Request submitted successfully.', data });
+};
+
+export const resubmitRequest = async (req, res) => {
+  const data = await requestService.resubmitRequest({
+    organizationId: req.auth.organizationId,
+    actorId: req.auth.userId,
+    access: req.requestAccess,
+    requestId: validateRequestId(req.params.requestId),
+  });
+  await runApprovalNotificationSafely(() => notifyRequestSubmission({
+    organizationId: req.auth.organizationId,
+    requestId: data.id,
+    event: 'request_resubmitted',
+  }));
+  return res.status(200).json({ success: true, message: 'Request resubmitted successfully.', data });
+};
+
+export const getApprovalProgress = async (req, res) => {
+  const data = await requestService.getApprovalProgress({
+    organizationId: req.auth.organizationId,
+    actorId: req.auth.userId,
+    access: req.requestAccess,
+    requestId: validateRequestId(req.params.requestId),
+  });
+  return res.status(200).json({ success: true, message: 'Approval progress retrieved successfully.', data });
+};
+
+export const getApprovalHistory = async (req, res) => {
+  const data = await requestService.getApprovalHistory({
+    organizationId: req.auth.organizationId,
+    actorId: req.auth.userId,
+    access: req.requestAccess,
+    requestId: validateRequestId(req.params.requestId),
+  });
+  return res.status(200).json({ success: true, message: 'Approval history retrieved successfully.', data });
 };
 
 export const cancelRequest = async (req, res) => {
@@ -79,7 +124,22 @@ export const cancelRequest = async (req, res) => {
     requestId: validateRequestId(req.params.requestId),
     cancellationReason,
   });
+  await runApprovalNotificationSafely(() => notifyRequestCancellation({
+    organizationId: req.auth.organizationId,
+    requestId: data.id,
+  }));
   return res.status(200).json({ success: true, message: 'Request cancelled successfully.', data });
 };
 
-export default { createRequest, listRequests, searchRequests, getRequest, updateRequest, submitRequest, cancelRequest };
+export default {
+  createRequest,
+  listRequests,
+  searchRequests,
+  getRequest,
+  updateRequest,
+  submitRequest,
+  resubmitRequest,
+  cancelRequest,
+  getApprovalProgress,
+  getApprovalHistory,
+};

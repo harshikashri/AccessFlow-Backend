@@ -56,6 +56,8 @@ export const env = {
   EMAIL_FROM: process.env.EMAIL_FROM?.trim() || '',
   EMAIL_TEST_MODE: parseBoolean(process.env.EMAIL_TEST_MODE, false),
   EMAIL_TEST_RECIPIENT: process.env.EMAIL_TEST_RECIPIENT?.trim().toLowerCase() || '',
+  APPROVAL_WORKER_ENABLED: parseBoolean(process.env.APPROVAL_WORKER_ENABLED, process.env.NODE_ENV !== 'test'),
+  APPROVAL_WORKER_INTERVAL_MS: parsePositiveInt(process.env.APPROVAL_WORKER_INTERVAL_MS, 60 * 1000),
   SUPER_ADMIN_NAME: process.env.SUPER_ADMIN_NAME?.trim() || '',
   SUPER_ADMIN_EMAIL: process.env.SUPER_ADMIN_EMAIL?.trim() || '',
   SUPER_ADMIN_PASSWORD: process.env.SUPER_ADMIN_PASSWORD || '',

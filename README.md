@@ -295,7 +295,7 @@ Example error response:
 
 ## User management
 
-User Management creates ordinary users, including future Department Managers, through the same endpoint. The authenticated organization context is authoritative; clients cannot choose a tenant. Organization membership is embedded in the User document, and roles remain in the existing `roles` and `userRoleAssignments` collections. User Management does not create custom roles or permission codes.
+User Management creates users, including Department Managers, through the same endpoint. The authenticated organization context is authoritative; clients cannot choose a tenant. Organization membership is embedded in the User document, and roles remain in the existing `roles` and `userRoleAssignments` collections. User Management does not create custom roles or permission codes.
 
 All tenant endpoints require a Bearer access token with an active organization context and the listed permission. Organization-scoped permissions apply throughout the organization. Department-scoped permissions apply only to users/departments in their assigned scope. Super Admin status alone does not grant tenant user-management access.
 
@@ -352,7 +352,9 @@ Example create response (`passwordSetupRequired` is true until setup completes):
 }
 ```
 
-`departmentId` and `roleAssignments` are optional. New users are created `INACTIVE` with `passwordSetupRequired: true`; no administrator-provided password is accepted. A random initial password hash is stored only as an unusable placeholder. A single-use setup token is sent by email; only its SHA-256 hash and 30-minute expiry are stored in the User document. Successful setup stores the chosen bcrypt password hash, clears the token, and activates the global account.
+`departmentId` and `roleAssignments` are optional. Department membership is set by `departmentId`, independently of assigned roles. For a department employee, omitting `roleAssignments` preserves the default Department Member role. To create a Department Manager, include the organization's active Department Manager role in `roleAssignments` at department scope; the automatic Department Member assignment is omitted. Role compatibility checks still prevent assigning Department Member and Department Manager together. Role IDs must belong to active roles in the authenticated organization, and assignment remains subject to the caller's authorization scope.
+
+New users are created `INACTIVE` with `passwordSetupRequired: true`; no administrator-provided password is accepted. A random initial password hash is stored only as an unusable placeholder. A single-use setup token is sent by email; only its SHA-256 hash and 30-minute expiry are stored in the User document. Successful setup stores the chosen bcrypt password hash, clears the token, and activates the global account.
 
 Role assignments must reference active roles in the same organization. Department-scoped assignments must reference an active department in that organization. Callers cannot grant role permissions beyond their own effective permissions/scope. Creating or editing roles remains outside this module; provision roles and permissions through a separate trusted process until Dynamic Role Management is implemented.
 
@@ -405,6 +407,14 @@ Common errors include `EMAIL_EXISTS` (`409`), `INVALID_ROLE_ASSIGNMENT` (`400`),
 6. Exercise `PATCH /api/users/:userId/deactivate` and `/activate` using an authorized admin. Verify only the target organization membership changes and its sessions are revoked.
 7. Test self-service reset with `POST /api/auth/forgot-password`, then submit the emailed token and matching new passwords to `POST /api/auth/reset-password`. The forgot-password response is generic and does not prove email delivery.
 8. Test admin reset with `POST /api/users/:userId/password-reset` using the admin token. It sends setup instructions for a pending account or reset instructions for an active account; complete the emailed token via the corresponding `/api/auth/set-password` or `/api/auth/reset-password` endpoint.
+
+---
+
+## Approval workflows
+
+Creating an organization provisions an active default approval workflow. Existing organizations can be synchronized with `npm run migrate:default-approval-workflows`; the migration processes every organization, creates only missing defaults, and preserves existing defaults and administrator changes.
+
+The default workflow requires Department Manager approval for every request as stage 1, using `CLAIM_ONE`. Eligible managers share one logical stage; after a manager claims it, the other candidate steps are non-actionable until an expired claim is released. Stage history displays the shared claim once. Stage 2 routes to the organization's Finance Approver role only when the request amount is strictly greater than 50,000. For Purchase Requests, the request amount is derived from the field marked with `semantic: "AMOUNT"` (the built-in field is `estimatedCost`). To safely mark the canonical Purchase Request field in existing organizations, first preview with `npm run migrate:purchase-request-amount-semantic -- --dry-run`, then run `npm run migrate:purchase-request-amount-semantic`; it only updates the required numeric `estimatedCost` field on a request type whose code is `PURCHASE`, and skips ambiguous or customized amount-field definitions. The migration does not alter existing requests. Organization Admins with `workflows.manage` can review and version-update the default through `GET /api/approval-workflows` and `PATCH /api/approval-workflows/:workflowId`; the default cannot be deactivated.
 
 ---
 
@@ -515,7 +525,7 @@ npm start
 npm test
 ```
 
-Tests use the isolated database `accessflow_test` (not `accessflow`).
+Tests start an ephemeral, single-node MongoDB replica set and use the isolated database `accessflow_test` (never `accessflow` or the development MongoDB port). Setup verifies transaction commit and rollback before tests run, and the replica set is stopped after the run. In test mode, the Resend provider is stubbed unless a test explicitly mocks it.
 
 ---
 

@@ -8,15 +8,25 @@ import { hashPassword } from '../src/utils/password.js';
 
 export const TEST_PASSWORD = 'StrongPass1!';
 
+const assertSafeTestDatabase = () => {
+  const uri = new URL(process.env.MONGODB_URI || '');
+  const databaseName = decodeURIComponent(uri.pathname.slice(1));
+  if (uri.port === '27017' || databaseName !== 'accessflow_test' || uri.searchParams.get('replicaSet') !== 'rsTest') {
+    throw new Error(`Refusing to run tests against unsafe MongoDB URI: ${uri.toString()}`);
+  }
+};
+
 export const connectTestDatabase = async () => {
+  assertSafeTestDatabase();
   await connectDatabase();
-  if (!mongoose.connection.name.includes('accessflow_test')) {
+  if (mongoose.connection.name !== 'accessflow_test') {
     throw new Error(`Refusing to run tests against database: ${mongoose.connection.name}`);
   }
 };
 
 export const resetTestDatabase = async () => {
-  if (!mongoose.connection.name.includes('accessflow_test')) {
+  assertSafeTestDatabase();
+  if (mongoose.connection.name !== 'accessflow_test') {
     throw new Error(`Refusing to drop database: ${mongoose.connection.name}`);
   }
   await mongoose.connection.dropDatabase();

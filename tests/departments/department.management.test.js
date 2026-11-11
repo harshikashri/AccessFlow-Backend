@@ -49,6 +49,19 @@ const createRoleAssignment = async ({ userId, organizationId, roleName, permissi
   return role;
 };
 
+const createDepartmentManagerAssignment = async ({ userId, organizationId, departmentId, assignedBy }) => {
+  const role = await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER', status: 'ACTIVE' });
+  return UserRoleAssignment.create({
+    userId,
+    roleId: role._id,
+    organizationId,
+    departmentId,
+    scopeType: 'DEPARTMENT',
+    status: 'ACTIVE',
+    assignedBy,
+  });
+};
+
 const createOrganizationContext = async (suffix = 'one') => {
   const organizationId = new mongoose.Types.ObjectId();
   const admin = await createUser({
@@ -282,6 +295,14 @@ describe('Department management', () => {
       String(managerA._id),
       String(managerB._id),
     ]);
+    expect(await UserRoleAssignment.countDocuments({
+      userId: { $in: [managerA._id, managerB._id] },
+      organizationId,
+      roleId: await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER' }).then((role) => role._id),
+      departmentId,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+    })).toBe(2);
 
     const replaced = await request(app)
       .patch(`/api/departments/${departmentId}/managers`)
@@ -291,6 +312,151 @@ describe('Department management', () => {
     expect((await Department.findById(departmentId)).managerIds.map(String)).toEqual([String(managerB._id)]);
     expect(await AuditLog.countDocuments({ action: 'DEPARTMENT_MANAGER_ASSIGNED', resourceId: departmentId })).toBe(2);
     expect(await AuditLog.countDocuments({ action: 'DEPARTMENT_MANAGER_REMOVED', resourceId: departmentId })).toBe(1);
+  });
+
+  it('reuses existing Department Manager assignments for one or more managers idempotently', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('existing-managers');
+    const department = await createDepartment(token, { name: 'Existing Managers' });
+    const managerA = await createMember({ email: 'existing-manager-a@example.com', organizationId });
+    const managerB = await createMember({ email: 'existing-manager-b@example.com', organizationId });
+    const assignmentA = await createDepartmentManagerAssignment({
+      userId: managerA._id,
+      organizationId,
+      departmentId: department.body.data.id,
+      assignedBy: admin._id,
+    });
+    const assignmentB = await createDepartmentManagerAssignment({
+      userId: managerB._id,
+      organizationId,
+      departmentId: department.body.data.id,
+      assignedBy: admin._id,
+    });
+
+    const response = await request(app)
+      .patch(`/api/departments/${department.body.data.id}/managers`)
+      .set(authHeader(token))
+      .send({ managerIds: [String(managerA._id), String(managerB._id)] });
+    expect(response.status).toBe(200);
+    expect((await Department.findById(department.body.data.id)).managerIds.map(String)).toEqual([
+      String(managerA._id),
+      String(managerB._id),
+    ]);
+
+    const repeated = await request(app)
+      .patch(`/api/departments/${department.body.data.id}/managers`)
+      .set(authHeader(token))
+      .send({ managerIds: [String(managerA._id), String(managerB._id)] });
+    expect(repeated.status).toBe(200);
+    const assignments = await UserRoleAssignment.find({
+      userId: { $in: [managerA._id, managerB._id] },
+      organizationId,
+      departmentId: department.body.data.id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+    }).sort({ userId: 1 });
+    expect(assignments.map((item) => String(item._id))).toEqual(
+      [assignmentA, assignmentB].map((item) => String(item._id)).sort()
+    );
+    expect(await AuditLog.countDocuments({
+      action: 'DEPARTMENT_MANAGER_ASSIGNED',
+      resourceId: department.body.data.id,
+    })).toBe(2);
+  });
+
+  it('preserves incompatible assignments and rolls back a partially processed manager batch', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('manager-rollback');
+    const department = await createDepartment(token, { name: 'Manager Rollback' });
+    const first = await createMember({ email: 'manager-rollback-first@example.com', organizationId });
+    const incompatible = await createMember({ email: 'manager-incompatible@example.com', organizationId });
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE', status: 'ACTIVE' });
+    const existingMemberAssignment = await UserRoleAssignment.create({
+      userId: incompatible._id,
+      roleId: memberRole._id,
+      organizationId,
+      departmentId: department.body.data.id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+      assignedBy: admin._id,
+    });
+    for (const user of [first, incompatible]) {
+      await createRoleAssignment({
+        userId: user._id,
+        organizationId,
+        roleName: `Manager Eligibility ${user.email}`,
+        permissions: ['departments.edit'],
+        assignedBy: admin._id,
+      });
+    }
+
+    const response = await request(app)
+      .patch(`/api/departments/${department.body.data.id}/managers`)
+      .set(authHeader(token))
+      .send({ managerIds: [String(first._id), String(incompatible._id)] });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('ROLE_COMPATIBILITY_CONFLICT');
+    expect((await Department.findById(department.body.data.id)).managerIds).toHaveLength(0);
+
+    const managerRole = await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER' });
+    expect(await UserRoleAssignment.countDocuments({
+      userId: first._id,
+      organizationId,
+      roleId: managerRole._id,
+      departmentId: department.body.data.id,
+      status: 'ACTIVE',
+    })).toBe(0);
+    const savedMemberAssignment = await UserRoleAssignment.findById(existingMemberAssignment._id);
+    expect(savedMemberAssignment.status).toBe('ACTIVE');
+    expect(await AuditLog.countDocuments({
+      action: 'DEPARTMENT_MANAGER_ASSIGNED',
+      resourceId: department.body.data.id,
+    })).toBe(0);
+  });
+
+  it('rejects organization-scoped or inactive Department Manager roles', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('invalid-manager-role');
+    const department = await createDepartment(token, { name: 'Invalid Manager Role' });
+    const wrongScopeUser = await createMember({ email: 'manager-wrong-scope@example.com', organizationId });
+    const inactiveRoleUser = await createMember({ email: 'manager-inactive-role@example.com', organizationId });
+    for (const user of [wrongScopeUser, inactiveRoleUser]) {
+      await createRoleAssignment({
+        userId: user._id,
+        organizationId,
+        roleName: `Manager Eligibility ${user.email}`,
+        permissions: ['departments.edit'],
+        assignedBy: admin._id,
+      });
+    }
+
+    const managerRole = await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER' });
+    await UserRoleAssignment.create({
+      userId: wrongScopeUser._id,
+      roleId: managerRole._id,
+      organizationId,
+      departmentId: null,
+      scopeType: 'ORGANIZATION',
+      status: 'ACTIVE',
+      assignedBy: admin._id,
+    });
+    const wrongScope = await request(app)
+      .patch(`/api/departments/${department.body.data.id}/managers`)
+      .set(authHeader(token))
+      .send({ managerIds: [String(wrongScopeUser._id)] });
+    expect(wrongScope.status).toBe(400);
+    expect(wrongScope.body.code).toBe('INVALID_ROLE_SCOPE');
+
+    managerRole.status = 'INACTIVE';
+    await managerRole.save();
+    const inactiveRole = await request(app)
+      .patch(`/api/departments/${department.body.data.id}/managers`)
+      .set(authHeader(token))
+      .send({ managerIds: [String(inactiveRoleUser._id)] });
+    expect(inactiveRole.status).toBe(409);
+    expect(inactiveRole.body.code).toBe('BUILT_IN_ROLE_MISSING');
+    expect((await Department.findById(department.body.data.id)).managerIds).toHaveLength(0);
+    expect(await AuditLog.countDocuments({
+      action: 'DEPARTMENT_MANAGER_ASSIGNED',
+      resourceId: department.body.data.id,
+    })).toBe(0);
   });
 
   it('limits department-scoped permissions to the assigned department', async () => {

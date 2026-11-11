@@ -178,9 +178,157 @@ describe('User management', () => {
     expect(setup.status).toBe(200);
     expect((await User.findById(createdUser._id)).passwordSetupRequired).toBe(false);
     expect((await User.collection.findOne({ _id: createdUser._id })).passwordSetupTokenHash).toBeUndefined();
+    const reusedSetupToken = await request(app).post('/api/auth/set-password').send({
+      token: setupToken,
+      password: TEST_PASSWORD,
+      confirmPassword: TEST_PASSWORD,
+    });
+    expect(reusedSetupToken.status).toBe(400);
+    expect(reusedSetupToken.body.code).toBe('INVALID_SETUP_TOKEN');
 
     const login = await loginRequest({ email: createdUser.email, password: TEST_PASSWORD });
     expect(login.status).toBe(200);
+  });
+
+  it('creates a department user with the built-in Department Member role using user-management permissions', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('default-member-role');
+    await Role.updateOne(
+      { organizationId, name: ORGANIZATION_ADMIN_ROLE_NAME },
+      { $set: { permissions: ['users.create', 'users.edit', 'roles.view', 'roles.create', 'roles.edit'] } }
+    );
+    const department = await Department.create({ organizationId, name: 'Default Member Department' });
+
+    const response = await createUserViaApi(token, {
+      name: 'Default Department Member',
+      email: 'default-department-member@example.com',
+      departmentId: String(department._id),
+    });
+
+    expect(response.status).toBe(201);
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+    expect(await UserRoleAssignment.exists({
+      userId: response.body.data.id,
+      organizationId,
+      roleId: memberRole._id,
+      scopeType: 'DEPARTMENT',
+      departmentId: department._id,
+      status: 'ACTIVE',
+    })).toBeTruthy();
+    expect(admin).toBeTruthy();
+  });
+
+  it('creates Department Managers without the default member role and preserves department membership', async () => {
+    const { organizationId, token } = await createOrganizationContext('create-department-managers');
+    const department = await Department.create({ organizationId, name: 'Manager Membership Department' });
+    const managerRole = await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER' });
+    const users = [];
+
+    for (const [name, email] of [
+      ['Manager One', 'manager-one@example.com'],
+      ['Manager Two', 'manager-two@example.com'],
+    ]) {
+      const response = await createUserViaApi(token, {
+        name,
+        email,
+        departmentId: String(department._id),
+        roleAssignments: [{
+          roleId: String(managerRole._id),
+          scopeType: 'DEPARTMENT',
+          departmentId: String(department._id),
+        }],
+      });
+      expect(response.status).toBe(201);
+      users.push(response.body.data.id);
+
+      const user = await User.findById(response.body.data.id);
+      expect(String(user.organizationMemberships[0].departmentId)).toBe(String(department._id));
+      expect(await UserRoleAssignment.countDocuments({
+        userId: user._id,
+        organizationId,
+        roleId: managerRole._id,
+        scopeType: 'DEPARTMENT',
+        departmentId: department._id,
+        status: 'ACTIVE',
+      })).toBe(1);
+    }
+
+    expect(users).toHaveLength(2);
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+    expect(await UserRoleAssignment.countDocuments({
+      userId: { $in: users },
+      organizationId,
+      roleId: memberRole._id,
+      status: 'ACTIVE',
+    })).toBe(0);
+  });
+
+  it('rejects invalid, inactive, and cross-organization selected roles atomically', async () => {
+    const local = await createOrganizationContext('selected-role-validation');
+    const foreign = await createOrganizationContext('selected-role-validation-foreign');
+    const department = await Department.create({ organizationId: local.organizationId, name: 'Selected Role Department' });
+    const inactiveRole = await Role.create({
+      organizationId: local.organizationId,
+      name: 'Inactive Custom Role',
+      roleType: 'CUSTOM',
+      permissions: ['users.view'],
+      status: 'INACTIVE',
+      createdBy: local.admin._id,
+    });
+    const foreignRole = await Role.findOne({
+      organizationId: foreign.organizationId,
+      roleType: 'DEPARTMENT_MANAGER',
+    });
+    const invalidRoleId = String(new mongoose.Types.ObjectId());
+    const requestedRoles = [
+      ['invalid', invalidRoleId, 'invalid-selected-role@example.com'],
+      ['inactive', String(inactiveRole._id), 'inactive-selected-role@example.com'],
+      ['foreign', String(foreignRole._id), 'foreign-selected-role@example.com'],
+    ];
+
+    for (const [label, roleId, email] of requestedRoles) {
+      const response = await createUserViaApi(local.token, {
+        name: `Selected ${label} role`,
+        email,
+        departmentId: String(department._id),
+        roleAssignments: [{
+          roleId,
+          scopeType: 'DEPARTMENT',
+          departmentId: String(department._id),
+        }],
+      });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('INVALID_ROLE_ASSIGNMENT');
+      expect(await User.exists({ email })).toBeNull();
+    }
+  });
+
+  it('keeps Department Manager and Department Member mutually exclusive during user creation', async () => {
+    const { organizationId, token } = await createOrganizationContext('selected-role-conflict');
+    const department = await Department.create({ organizationId, name: 'Mutually Exclusive Department' });
+    const managerRole = await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER' });
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+
+    const response = await createUserViaApi(token, {
+      name: 'Conflicting Manager',
+      email: 'conflicting-manager@example.com',
+      departmentId: String(department._id),
+      roleAssignments: [
+        {
+          roleId: String(managerRole._id),
+          scopeType: 'DEPARTMENT',
+          departmentId: String(department._id),
+        },
+        {
+          roleId: String(memberRole._id),
+          scopeType: 'DEPARTMENT',
+          departmentId: String(department._id),
+        },
+      ],
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('ROLE_COMPATIBILITY_CONFLICT');
+    expect(await User.exists({ email: 'conflicting-manager@example.com' })).toBeNull();
   });
 
   it('rejects duplicate role assignments and rolls back user creation when assignment validation fails', async () => {
@@ -313,6 +461,49 @@ describe('User management', () => {
     expect(response.body.code).toBe('ROLE_ASSIGNMENT_FORBIDDEN');
     expect(await User.findOne({ email: 'escalated-user@example.com' })).toBeNull();
     expect(token).toBeTruthy();
+  });
+
+  it('does not allow a non-admin with user-creation permission to assign the built-in Department Manager role', async () => {
+    const { organizationId, admin } = await createOrganizationContext('built-in-manager-restriction');
+    const department = await Department.create({ organizationId, name: 'Manager Role Department' });
+    const userCreatorRole = await Role.create({
+      organizationId,
+      name: 'User Creator',
+      roleType: 'CUSTOM',
+      permissions: ['users.create'],
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    });
+    const caller = await createActiveUser({
+      organizationId,
+      email: 'built-in-manager-restricted-caller@example.com',
+    });
+    await UserRoleAssignment.create({
+      userId: caller._id,
+      roleId: userCreatorRole._id,
+      organizationId,
+      departmentId: null,
+      scopeType: 'ORGANIZATION',
+      status: 'ACTIVE',
+      assignedBy: admin._id,
+    });
+    const callerLogin = await loginRequest({ email: caller.email, password: TEST_PASSWORD });
+    const managerRole = await Role.findOne({ organizationId, roleType: 'DEPARTMENT_MANAGER' });
+
+    const response = await createUserViaApi(callerLogin.body.data.accessToken, {
+      name: 'Unauthorized Manager',
+      email: 'unauthorized-built-in-manager@example.com',
+      departmentId: String(department._id),
+      roleAssignments: [{
+        roleId: String(managerRole._id),
+        scopeType: 'DEPARTMENT',
+        departmentId: String(department._id),
+      }],
+    });
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('ROLE_ASSIGNMENT_FORBIDDEN');
+    expect(await User.exists({ email: 'unauthorized-built-in-manager@example.com' })).toBeNull();
   });
 
   it('applies centralized role compatibility during user creation as well as role assignment', async () => {
@@ -736,8 +927,47 @@ describe('User management', () => {
     expect(created.status).toBe(502);
     expect(created.body.code).toBe('USER_CREATED_EMAIL_FAILED');
     expect(created.body.message).not.toContain('provider detail');
-    const user = await User.findOne({ email: 'email-failure-user@example.com' });
+    const userId = created.body.details.userId;
+    expect(userId).toBeTruthy();
+    const user = await User.findById(userId);
     expect(user).toBeTruthy();
     expect(user.passwordSetupRequired).toBe(true);
+    const initialSetupHash = (await User.collection.findOne({ _id: user._id })).passwordSetupTokenHash;
+    expect(initialSetupHash).toBeTruthy();
+
+    const duplicate = await createUserViaApi(context.token, {
+      name: 'Email Failure User',
+      email: 'email-failure-user@example.com',
+    });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.code).toBe('EMAIL_EXISTS');
+    expect(await User.countDocuments({ email: 'email-failure-user@example.com' })).toBe(1);
+
+    const retry = await request(app)
+      .post(`/api/users/${userId}/password-reset`)
+      .set(authHeader(context.token));
+    expect(retry.status).toBe(200);
+    expect(sendWithResendMock).toHaveBeenCalledTimes(3);
+    const retrySetupToken = extractToken(sendWithResendMock.mock.calls.at(-1)[0].html, 'set-password');
+    const updatedUser = await User.collection.findOne({ _id: user._id });
+    expect(updatedUser.passwordSetupTokenHash).toBeTruthy();
+    expect(updatedUser.passwordSetupTokenHash).not.toBe(initialSetupHash);
+    expect(updatedUser.passwordSetupTokenHash).not.toBe(retrySetupToken);
+    expect(updatedUser.passwordSetupTokenExpiresAt.getTime()).toBeGreaterThan(Date.now());
+
+    const completedRetry = await request(app).post('/api/auth/set-password').send({
+      token: retrySetupToken,
+      password: TEST_PASSWORD,
+      confirmPassword: TEST_PASSWORD,
+    });
+    expect(completedRetry.status).toBe(200);
+    expect((await User.findById(user._id)).accountStatus).toBe('ACTIVE');
+    const reusedRetryToken = await request(app).post('/api/auth/set-password').send({
+      token: retrySetupToken,
+      password: TEST_PASSWORD,
+      confirmPassword: TEST_PASSWORD,
+    });
+    expect(reusedRetryToken.status).toBe(400);
+    expect(reusedRetryToken.body.code).toBe('INVALID_SETUP_TOKEN');
   });
 });

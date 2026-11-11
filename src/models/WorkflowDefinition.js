@@ -41,6 +41,11 @@ const workflowStageConditionSchema = new mongoose.Schema(
 
 const workflowStageSchema = new mongoose.Schema(
   {
+    stageId: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+    },
     sequence: {
       type: Number,
       required: true,
@@ -52,10 +57,33 @@ const workflowStageSchema = new mongoose.Schema(
       trim: true,
       maxlength: 200,
     },
+    description: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: '',
+    },
     approverType: {
       type: String,
-      enum: ['DEPARTMENT_MANAGER', 'ROLE', 'USER'],
+      enum: ['DEPARTMENT_MANAGER', 'ROLE', 'USER', 'ORGANIZATION_ADMIN'],
       required: true,
+    },
+    assignment: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    approvalMode: {
+      type: String,
+      enum: ['ANY', 'ALL'],
+      default: 'ANY',
+    },
+    isMandatory: {
+      type: Boolean,
+      default: false,
+    },
+    isConfigurable: {
+      type: Boolean,
+      default: true,
     },
     roleId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -65,6 +93,31 @@ const workflowStageSchema = new mongoose.Schema(
     condition: {
       type: workflowStageConditionSchema,
       default: null,
+    },
+    sla: {
+      duration: { type: Number, min: 1, default: null },
+      unit: { type: String, enum: ['MINUTES', 'HOURS', 'DAYS'], default: 'HOURS' },
+      reminders: [{
+        after: { type: Number, min: 1 },
+        unit: { type: String, enum: ['MINUTES', 'HOURS', 'DAYS'] },
+      }],
+      escalation: {
+        enabled: { type: Boolean, default: false },
+        after: { type: Number, min: 1, default: null },
+        unit: { type: String, enum: ['MINUTES', 'HOURS', 'DAYS'], default: 'HOURS' },
+        targetType: { type: String, enum: ['USER', 'ROLE'], default: null },
+        targetId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        levels: [{
+          after: { type: Number, min: 1, required: true },
+          unit: { type: String, enum: ['MINUTES', 'HOURS', 'DAYS'], default: 'HOURS' },
+          targetType: { type: String, enum: ['USER', 'ROLE'], required: true },
+          targetId: { type: mongoose.Schema.Types.ObjectId, required: true },
+        }],
+      },
+      claimExpiry: {
+        duration: { type: Number, min: 1, default: null },
+        unit: { type: String, enum: ['MINUTES', 'HOURS', 'DAYS'], default: 'HOURS' },
+      },
     },
   },
   { _id: false }
@@ -94,6 +147,11 @@ const workflowDefinitionSchema = new mongoose.Schema(
       enum: REQUEST_TYPES,
       default: null,
     },
+    requestTypeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'WorkflowDefinition',
+      default: null,
+    },
     code: {
       type: String,
       trim: true,
@@ -114,6 +172,10 @@ const workflowDefinitionSchema = new mongoose.Schema(
     fields: {
       type: [requestTypeFieldSchema],
       default: [],
+    },
+    isDefault: {
+      type: Boolean,
+      default: false,
     },
     version: {
       type: Number,
@@ -146,6 +208,18 @@ const workflowDefinitionSchema = new mongoose.Schema(
 workflowDefinitionSchema.index({ organizationId: 1, requestType: 1, isActive: 1 });
 workflowDefinitionSchema.index({ organizationId: 1, name: 1, version: 1 }, { unique: true });
 workflowDefinitionSchema.index(
+  { organizationId: 1, requestTypeId: 1, version: 1 },
+  { unique: true, partialFilterExpression: { definitionType: 'APPROVAL_WORKFLOW', requestTypeId: { $type: 'objectId' } } }
+);
+workflowDefinitionSchema.index(
+  { organizationId: 1, requestTypeId: 1 },
+  { unique: true, partialFilterExpression: { definitionType: 'APPROVAL_WORKFLOW', requestTypeId: { $type: 'objectId' }, isActive: true } }
+);
+workflowDefinitionSchema.index(
+  { organizationId: 1, isDefault: 1 },
+  { unique: true, partialFilterExpression: { definitionType: 'APPROVAL_WORKFLOW', isDefault: true, isActive: true } }
+);
+workflowDefinitionSchema.index(
   { organizationId: 1, codeNormalized: 1 },
   { unique: true, partialFilterExpression: { definitionType: 'REQUEST_TYPE', codeNormalized: { $type: 'string' } } }
 );
@@ -157,9 +231,8 @@ workflowDefinitionSchema.pre('validate', function validateDefinition(next) {
     if (this.stages?.length) this.invalidate('stages', 'Request type records cannot define approval stages.');
   } else if (!this.stages?.length) {
     this.invalidate('stages', 'At least one workflow stage is required.');
-  }
-  if (this.definitionType === 'APPROVAL_WORKFLOW' && !this.requestType) {
-    this.invalidate('requestType', 'Workflow requestType is required.');
+  } else if (this.definitionType === 'APPROVAL_WORKFLOW' && this.requestTypeId && this.requestTypeId.equals(this._id)) {
+    this.invalidate('requestTypeId', 'A workflow cannot target itself.');
   }
   if (this.code !== undefined && this.code !== null) {
     this.codeNormalized = this.code.trim().toLocaleLowerCase('en-US');

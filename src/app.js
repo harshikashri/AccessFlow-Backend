@@ -9,6 +9,9 @@ import userRoutes from './modules/users/user.routes.js';
 import roleRoutes from './modules/roles/role.routes.js';
 import requestRoutes from './modules/requests/request.routes.js';
 import requestTypeRoutes from './modules/requests/requestType.routes.js';
+import approvalWorkflowRoutes from './modules/requests/approvalWorkflow.routes.js';
+import approvalRuntimeRoutes from './modules/requests/approvalRuntime.routes.js';
+import approvalDelegationRoutes from './modules/requests/approvalDelegation.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 const app = express();
@@ -38,6 +41,9 @@ app.use('/api/departments', departmentRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/roles', roleRoutes);
 app.use('/api/request-types', requestTypeRoutes);
+app.use('/api/approval-workflows', approvalWorkflowRoutes);
+app.use('/api/approvals', approvalRuntimeRoutes);
+app.use('/api/approval-delegations', approvalDelegationRoutes);
 app.use('/api/requests', requestRoutes);
 
 app.use(notFoundHandler);

@@ -12,8 +12,7 @@ import { escapeRegex, getScopedDepartmentIds, toPublicDepartment, toPublicDepart
 import {
 	getBuiltInRole,
 	ensureEmployeeDepartmentAssignment,
-	persistRoleAssignments,
-	prepareRoleAssignments,
+	ensureDepartmentManagerAssignment,
 } from '../roles/role.assignment.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, departmentId, changes }) => {
@@ -407,39 +406,33 @@ export const replaceDepartmentManagers = async ({ departmentId, organizationId, 
 		const nextIds = normalizedIds.map(String);
 		const added = nextIds.filter((id) => !previousIds.includes(id));
 		const removed = previousIds.filter((id) => !nextIds.includes(id));
-		if (added.length === 0 && removed.length === 0) {
-			return toPublicDepartment(department, { managerCount: nextIds.length });
+		if (added.length || removed.length) {
+			department.managerIds = normalizedIds;
+			await department.save({ session });
 		}
 
-		department.managerIds = normalizedIds;
-		await department.save({ session });
-		const managerRole = await getBuiltInRole({ organizationId, roleType: 'DEPARTMENT_MANAGER', session });
-		const memberRole = await getBuiltInRole({ organizationId, roleType: 'EMPLOYEE', session });
-		for (const userId of added) {
-			await deactivateScopedRoleAssignment({
-				userId, organizationId, roleId: memberRole._id, departmentId: department._id, session,
-			});
-			const prepared = await prepareRoleAssignments({
-				assignments: [{ roleId: managerRole._id, scopeType: 'DEPARTMENT', departmentId: department._id }],
+		const managerRole = nextIds.length || removed.length
+			? await getBuiltInRole({ organizationId, roleType: 'DEPARTMENT_MANAGER', session })
+			: null;
+		const auditedManagerIds = new Set(added);
+		for (const userId of nextIds) {
+			const { created } = await ensureDepartmentManagerAssignment({
+				userId,
 				organizationId,
+				departmentId: department._id,
+				role: managerRole,
+				actorId,
 				access,
 				session,
-				userId,
 			});
-			await persistRoleAssignments({
-				assignments: prepared,
-				userId,
-				organizationId,
-				actorId,
-				session,
-			});
+			if (created) auditedManagerIds.add(userId);
 		}
 		for (const userId of removed) {
 			await deactivateScopedRoleAssignment({
 				userId, organizationId, roleId: managerRole._id, departmentId: department._id, session,
 			});
 		}
-		for (const userId of added) {
+		for (const userId of auditedManagerIds) {
 			await writeAuditLog(session, {
 				organizationId,
 				actorId,
