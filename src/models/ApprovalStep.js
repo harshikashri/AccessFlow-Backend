@@ -124,6 +124,7 @@ const approvalStepSchema = new mongoose.Schema(
 
 approvalStepSchema.index({ requestId: 1, attemptNumber: 1, sequence: 1, approverId: 1 }, { unique: true });
 approvalStepSchema.index({ organizationId: 1, approverId: 1, status: 1 });
+approvalStepSchema.index({ organizationId: 1, decidedBy: 1, decisionAt: -1 });
 approvalStepSchema.index({ organizationId: 1, status: 1, slaDueAt: 1 });
 approvalStepSchema.index({ organizationId: 1, status: 1, claimExpiresAt: 1 });
 approvalStepSchema.index({ status: 1, claimExpiresAt: 1 });

@@ -427,7 +427,7 @@ Roles and user assignments are stored in the existing `roles` and `userRoleAssig
 | `POST` | `/api/roles` | Create a custom role | `roles.create` |
 | `GET` | `/api/roles` | Search/list roles | `roles.view` |
 | `GET` | `/api/roles/:roleId` | Get role details and assignment count | `roles.view` |
-| `PATCH` | `/api/roles/:roleId` | Update name/description | `roles.edit` |
+| `PATCH` | `/api/roles/:roleId` | Update name/description/role purpose | `roles.edit` |
 | `PATCH` | `/api/roles/:roleId/permissions` | Replace permission set | `roles.edit` |
 | `GET` | `/api/roles/permissions/catalog` | Get centralized permission catalog | `roles.view` |
 | `PATCH` | `/api/roles/:roleId/activate` | Activate a role | `roles.edit` |
@@ -444,11 +444,14 @@ Create role request:
   "name": "Finance Approver",
   "description": "Reviews and approves finance requests",
   "roleType": "CUSTOM",
+  "rolePurpose": "FINANCE_APPROVER",
   "permissions": ["requests.view", "requests.approve"]
 }
 ```
 
 `roleType` accepts `CUSTOM`, `EMPLOYEE`, or `DEPARTMENT_MANAGER`. The built-in `ORGANIZATION_ADMIN` type is provisioned by Organization Management and cannot be created through this API. When omitted, a new role defaults to `CUSTOM`.
+
+`rolePurpose` is optional metadata for custom roles. It accepts `GENERAL` or `FINANCE_APPROVER` and defaults to `GENERAL`. It does not grant permissions; effective access still comes only from the role's permission set and active assignment. Only custom roles can have their purpose changed.
 
 Replace permissions with `PATCH /api/roles/:roleId/permissions`:
 
@@ -488,6 +491,137 @@ Roles use the optional `roleType` metadata on the existing Role document. Compat
 Deactivating a role preserves the role and assignments but removes its permissions from effective authorization. Reactivation restores permissions only through assignments that remain active. The last active Organization Admin able to manage roles cannot be deactivated, stripped of `roles.view/create/edit`, or unassigned. Role changes and assignment writes are transactional with append-only audit events: `ROLE_CREATED`, `ROLE_UPDATED`, `ROLE_PERMISSIONS_UPDATED`, `ROLE_ACTIVATED`, `ROLE_DEACTIVATED`, `ROLE_ASSIGNED`, and `ROLE_UNASSIGNED`.
 
 Manual Postman sequence: log in as an Organization Admin; create a role with `POST /api/roles`; inspect available permission IDs with `GET /api/roles/permissions/catalog`; assign it using `POST /api/roles/:roleId/assign`; verify with `GET /api/roles/users/:userId`; update permissions or deactivate the role; reuse the assignee's existing access token to confirm permissions take effect immediately; then reactivate or remove the assignment. Role endpoints return `403` for non-Organization Admin actors and `404` for resources outside the caller's organization.
+
+---
+
+## Dashboard APIs
+
+Tenant dashboard endpoints require authentication and effective `dashboard.view` permission. Tenant data is additionally limited by the caller's existing request, approval, department, and audit permissions; query parameters cannot select another organization or widen that scope. Super Admin uses the authenticated platform dashboard context, bypasses tenant `dashboard.view`, and is not granted tenant approval or request data.
+
+| Method | Path | Additional effective permission |
+|---|---|---|
+| `GET` | `/api/dashboard/config` | None |
+| `GET` | `/api/dashboard/summary` | Per-widget permissions |
+| `GET` | `/api/dashboard/request-analytics` | `requests.view` |
+| `GET` | `/api/dashboard/approval-analytics` | `requests.approve` |
+| `GET` | `/api/dashboard/department-analytics` | Authorized department request or approval scope |
+| `GET` | `/api/dashboard/recent-activity` | `requests.view`, `requests.approve`, or `audit_logs.view` within effective scope |
+
+Analytics endpoints accept `range` with `LAST_7_DAYS`, `LAST_30_DAYS` (default), `LAST_90_DAYS`, `THIS_MONTH`, `THIS_YEAR`, or `CUSTOM`. Custom ranges require both `fromDate` and `toDate` in `YYYY-MM-DD` or UTC ISO 8601 form. Date intervals are UTC and half-open: `[fromDate, toDate)`. Preset ranges do not accept custom date fields.
+
+`GET /api/dashboard/recent-activity` also accepts `page` (default `1`) and `limit` (default `10`, maximum `100`). It returns allowlisted request, approval, and delegation activity with actor/request metadata; raw audit `changes` are not returned. Activity is filtered to the caller's authorized request history, approval assignments, or `audit_logs.view` scope. Department-scoped audit access is restricted to that department's request and approval events.
+
+Request analytics returns chart-ready period counts, request status/type distributions, and current-versus-previous period volume. Approval analytics returns approval status/stage counts, workload, decisions, decision duration, and SLA metrics; metrics without a valid sample are `null`. Department analytics returns per-department request or approval metrics limited to authorized scope. Platform analytics endpoints do not expose tenant records.
+
+All responses use `{ "success": true, "message": "...", "data": { ... } }`. Analytics `data.dateRange` is serialized as `{ "range": "...", "fromDate": "...", "toDate": "...", "timeZone": "UTC", "interval": "[fromDate, toDate)" }`. Invalid query input returns HTTP `400` with `code: "VALIDATION_ERROR"`; unauthenticated calls return `401`; missing dashboard or provider permissions return `403`.
+
+Representative response shapes:
+
+```json
+{
+  "success": true,
+  "message": "Dashboard configuration retrieved successfully.",
+  "data": {
+    "dashboardType": "DYNAMIC",
+    "userContext": { "userId": "USER_ID", "organizationId": "ORG_ID" },
+    "widgets": [
+      {
+        "key": "REQUEST_SUMMARY",
+        "scope": "AUTHORIZED_REQUEST_HISTORY",
+        "supportedFilters": ["dateRange"],
+        "kpiProvider": "REQUESTS",
+        "kpiStatus": "IMPLEMENTED",
+        "analyticsProvider": "REQUESTS",
+        "analyticsStatus": "IMPLEMENTED"
+      }
+    ],
+    "availableFilters": { "dateRange": ["LAST_7_DAYS", "LAST_30_DAYS", "LAST_90_DAYS", "THIS_MONTH", "THIS_YEAR", "CUSTOM"] },
+    "dateRangeOptions": { "timeZone": "UTC", "interval": "[fromDate, toDate)", "maxCustomRangeDays": 366 }
+  }
+}
+```
+
+```json
+{
+  "success": true,
+  "message": "Dashboard summary retrieved successfully.",
+  "data": {
+    "dashboardType": "DYNAMIC",
+    "dateRange": { "range": "LAST_30_DAYS", "fromDate": "2026-10-13T00:00:00.000Z", "toDate": "2026-11-12T00:00:00.000Z", "timeZone": "UTC", "interval": "[fromDate, toDate)" },
+    "widgets": [],
+    "deferredWidgets": [],
+    "kpis": [{ "key": "MY_TOTAL_REQUESTS", "title": "My Total Requests", "value": 4, "format": "NUMBER", "trend": null }]
+  }
+}
+```
+
+```json
+{
+  "success": true,
+  "message": "Request analytics retrieved successfully.",
+  "data": {
+    "dateRange": { "range": "LAST_30_DAYS", "fromDate": "2026-10-13T00:00:00.000Z", "toDate": "2026-11-12T00:00:00.000Z", "timeZone": "UTC", "interval": "[fromDate, toDate)" },
+    "scope": "AUTHORIZED_REQUEST_HISTORY",
+    "grouping": "DAY",
+    "requestTrends": [{ "period": "2026-11-11", "periodStart": "2026-11-11T00:00:00.000Z", "count": 2 }],
+    "statusDistribution": [{ "status": "APPROVED", "count": 1 }],
+    "requestTypes": [{ "requestTypeId": "TYPE_ID", "requestType": "Purchase Request", "total": 2, "percentage": 50, "statusCounts": [{ "status": "APPROVED", "count": 1 }] }],
+    "requestVolumeComparison": { "currentPeriodCount": 4, "previousPeriodCount": 2, "absoluteDifference": 2, "percentageChange": 100 }
+  }
+}
+```
+
+```json
+{
+  "success": true,
+  "message": "Approval analytics retrieved successfully.",
+  "data": {
+    "scope": "AUTHORIZED_APPROVAL_ASSIGNMENTS",
+    "approvalStatusDistribution": [{ "status": "ACTIVE", "count": 1 }],
+    "decisions": [{ "decision": "APPROVED", "count": 3 }, { "decision": "DELEGATED", "count": 0 }],
+    "stages": [{ "stageId": "manager-stage", "stageName": "Department Manager", "totalSteps": 3, "pendingSteps": 1, "completedSteps": 2, "approvedSteps": 2, "rejectedSteps": 0, "returnedSteps": 0 }],
+    "workload": { "pendingApprovalStages": 1, "availableToClaimStages": 1, "currentlyOverdueStages": 0 },
+    "performance": { "completedDecisions": 3, "averageDecisionMinutes": 42.5, "medianDecisionMinutes": 35, "slaDecisionSampleSize": 2, "onTimeDecisions": 2, "overdueDecisions": 0, "slaCompliancePercentage": 100 }
+  }
+}
+```
+
+```json
+{
+  "success": true,
+  "message": "Department analytics retrieved successfully.",
+  "data": {
+    "scope": "ORGANIZATION",
+    "departments": [{ "departmentId": "DEPARTMENT_ID", "departmentName": "Engineering", "totalRequests": 12, "pendingRequests": 4, "approvedRequests": 6, "rejectedRequests": 1, "returnedRequests": 1, "averageApprovalMinutes": null }]
+  }
+}
+```
+
+```json
+{
+  "success": true,
+  "message": "Recent activity retrieved successfully.",
+  "data": {
+    "scope": "AUTHORIZED_REQUESTS_AND_APPROVALS",
+    "items": [{
+      "activityId": "AUDIT_ID",
+      "type": "APPROVAL",
+      "action": "APPROVAL_GRANTED",
+      "actionLabel": "Approval completed",
+      "actorId": "USER_ID",
+      "actorName": "Jordan Lee",
+      "requestId": "REQUEST_ID",
+      "requestNumber": "REQ-26-1234",
+      "requestType": "Purchase Request",
+      "stage": { "id": "finance-stage", "name": "Finance Approval" },
+      "timestamp": "2026-11-11T10:30:00.000Z"
+    }],
+    "pagination": { "page": 1, "limit": 10, "total": 1, "totalPages": 1 }
+  }
+}
+```
+
+Request history remains owner-only for Employees and Department Managers; approval analytics and activity use separately authorized assignment/delegation scope. Organization Admin request analytics require organization-scoped request permissions. Super Admin analytics responses use `scope: "PLATFORM"` and do not query tenant request data.
 
 ---
 

@@ -30,6 +30,11 @@ const roleSchema = new mongoose.Schema(
       type: String,
       enum: ROLE_TYPES,
     },
+    rolePurpose: {
+      type: String,
+      enum: ['GENERAL', 'FINANCE_APPROVER'],
+      default: 'GENERAL',
+    },
     permissions: {
       type: [String],
       default: [],

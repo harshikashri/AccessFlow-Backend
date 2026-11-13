@@ -135,6 +135,7 @@ const requestSchema = new mongoose.Schema(
 );
 
 requestSchema.index({ organizationId: 1, status: 1, createdAt: -1 });
+requestSchema.index({ organizationId: 1, createdAt: -1 });
 requestSchema.index({ requesterId: 1, createdAt: -1 });
 requestSchema.index({ organizationId: 1, requestNumber: 1 }, { unique: true });
 requestSchema.index({ organizationId: 1, requesterId: 1, createdAt: -1 });

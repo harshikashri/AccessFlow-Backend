@@ -9,6 +9,7 @@ export const toPublicRole = (role, assignmentCount = 0) => ({
   name: role.name,
   description: role.description,
   roleType: getRoleType(role),
+  rolePurpose: role.rolePurpose || 'GENERAL',
   permissions: role.permissions || [],
   status: role.status,
   createdBy: role.createdBy ? String(role.createdBy) : null,

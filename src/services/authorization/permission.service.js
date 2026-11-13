@@ -32,7 +32,7 @@ export const resolveEffectivePermissions = async ({ userId, organizationId }) =>
     organizationId,
     status: 'ACTIVE',
   })
-    .populate({ path: 'roleId', select: 'organizationId name roleType status permissions' })
+    .populate({ path: 'roleId', select: 'organizationId name roleType rolePurpose status permissions' })
     .lean();
   const activeAssignments = assignments.filter((assignment) =>
     assignment.roleId &&

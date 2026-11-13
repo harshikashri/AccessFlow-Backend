@@ -12,6 +12,7 @@ import requestTypeRoutes from './modules/requests/requestType.routes.js';
 import approvalWorkflowRoutes from './modules/requests/approvalWorkflow.routes.js';
 import approvalRuntimeRoutes from './modules/requests/approvalRuntime.routes.js';
 import approvalDelegationRoutes from './modules/requests/approvalDelegation.routes.js';
+import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 
 const app = express();
@@ -44,6 +45,7 @@ app.use('/api/request-types', requestTypeRoutes);
 app.use('/api/approval-workflows', approvalWorkflowRoutes);
 app.use('/api/approvals', approvalRuntimeRoutes);
 app.use('/api/approval-delegations', approvalDelegationRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/requests', requestRoutes);
 
 app.use(notFoundHandler);
