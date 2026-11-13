@@ -3,6 +3,7 @@ import { ENTITY_STATUS, PERMISSION_CATALOG, SCOPE_TYPES } from '../../config/con
 import { AppError } from '../../utils/AppError.js';
 import {
 	CREATABLE_ROLE_TYPES,
+	ROLE_PURPOSES,
 	ROLE_DESCRIPTION_MAX,
 	ROLE_NAME_MAX,
 	ROLE_NAME_MIN,
@@ -54,7 +55,7 @@ export const validatePermissions = (value) => {
 
 export const validateCreateRole = (body) => {
 	requireObject(body);
-	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'permissions', 'roleType'].includes(key));
+	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'permissions', 'roleType', 'rolePurpose'].includes(key));
 	if (unknown.length) throw new AppError('Unsupported role fields.', 400, 'VALIDATION_ERROR', unknown);
 	const roleType = body.roleType === undefined ? 'CUSTOM' : body.roleType;
 	if (!CREATABLE_ROLE_TYPES.includes(roleType)) fail('Built-in roles are provisioned with the organization and cannot be created through this API.');
@@ -63,17 +64,27 @@ export const validateCreateRole = (body) => {
 		description: body.description === undefined ? '' : validateDescription(body.description),
 		permissions: validatePermissions(body.permissions),
 		roleType,
+		rolePurpose: validateRolePurpose(body.rolePurpose),
 	};
+};
+
+const validateRolePurpose = (value) => {
+	const purpose = value === undefined ? 'GENERAL' : value;
+	if (typeof purpose !== 'string' || !ROLE_PURPOSES.includes(purpose)) {
+		fail(`rolePurpose must be one of: ${ROLE_PURPOSES.join(', ')}.`);
+	}
+	return purpose;
 };
 
 export const validateUpdateRole = (body) => {
 	requireObject(body);
-	const unknown = Object.keys(body).filter((key) => !['name', 'description'].includes(key));
-	if (unknown.length) throw new AppError('Only role name and description can be updated here.', 400, 'VALIDATION_ERROR', unknown);
+	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'rolePurpose'].includes(key));
+	if (unknown.length) throw new AppError('Unsupported role update fields.', 400, 'VALIDATION_ERROR', unknown);
 	if (Object.keys(body).length === 0) fail('At least one role field must be provided.');
 	const input = {};
 	if (Object.hasOwn(body, 'name')) input.name = validateName(body.name);
 	if (Object.hasOwn(body, 'description')) input.description = validateDescription(body.description);
+	if (Object.hasOwn(body, 'rolePurpose')) input.rolePurpose = validateRolePurpose(body.rolePurpose);
 	return input;
 };
 

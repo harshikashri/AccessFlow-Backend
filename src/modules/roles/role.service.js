@@ -147,6 +147,7 @@ export const createRole = async ({ organizationId, actorId, input }) => {
 				nameNormalized: normalizeRoleName(input.name),
 				description: input.description,
 				roleType: input.roleType || 'CUSTOM',
+				rolePurpose: input.rolePurpose || 'GENERAL',
 				permissions: input.permissions,
 				status: 'ACTIVE',
 				createdBy: actorId,
@@ -157,7 +158,7 @@ export const createRole = async ({ organizationId, actorId, input }) => {
 				actorId,
 				action: ROLE_ACTIONS.CREATED,
 				resourceId: role._id,
-				changes: { name: role.name, description: role.description, roleType: role.roleType, permissions: role.permissions, status: role.status },
+				changes: { name: role.name, description: role.description, roleType: role.roleType, rolePurpose: role.rolePurpose, permissions: role.permissions, status: role.status },
 			});
 			return toPublicRole(role);
 		});
@@ -206,6 +207,9 @@ export const updateRole = async ({ roleId, organizationId, actorId, input }) => 
 		return await withTransaction(async (session) => {
 			await assertActiveOrganization(organizationId, session);
 			const role = await getRoleInOrganization({ roleId, organizationId, session });
+			if (Object.hasOwn(input, 'rolePurpose') && isBuiltInRole(role)) {
+				throw new AppError('Role purpose can only be changed for custom roles.', 409, 'BUILT_IN_ROLE_PROTECTED');
+			}
 			if (isBuiltInRole(role) && Object.hasOwn(input, 'name')) {
 				throw new AppError('Built-in roles cannot be renamed.', 409, 'BUILT_IN_ROLE_PROTECTED');
 			}

@@ -178,15 +178,30 @@ const mapDuplicateError = (error) => {
   return error;
 };
 
-const resolveRequestVisibility = async ({ organizationId, actorId, access }) => {
+export const resolveRequestVisibility = async ({ organizationId, actorId, access }) => {
   const isOrganizationAdmin = access.assignments.some(
     (assignment) => assignment.roleId?.roleType === 'ORGANIZATION_ADMIN'
   );
   const isDepartmentManager = access.assignments.some(
     (assignment) => assignment.roleId?.roleType === 'DEPARTMENT_MANAGER'
   );
-  const canViewOrganization = isOrganizationAdmin &&
-    access.organizationPermissions.has('requests.view');
+  const isEmployee = access.assignments.some(
+    (assignment) => assignment.roleId?.roleType === 'EMPLOYEE'
+  );
+  const isPersonalHistoryOnly = isDepartmentManager || isEmployee;
+  const customRequestViewAssignments = access.assignments.filter((assignment) =>
+    assignment.roleId?.roleType === 'CUSTOM' &&
+    assignment.roleId.permissions?.includes('requests.view')
+  );
+  const customOrganizationRequestView = customRequestViewAssignments.some((assignment) =>
+    assignment.scopeType === 'ORGANIZATION' && !assignment.departmentId
+  );
+  const customRequestViewDepartmentIds = new Set(customRequestViewAssignments
+    .filter((assignment) => assignment.scopeType === 'DEPARTMENT' && assignment.departmentId)
+    .map((assignment) => String(assignment.departmentId)));
+  const canViewOrganization = !isPersonalHistoryOnly &&
+    ((isOrganizationAdmin && access.organizationPermissions.has('requests.view')) ||
+      customOrganizationRequestView);
   const delegatedUsers = await User.find({
     accountStatus: 'ACTIVE',
     organizationMemberships: { $elemMatch: { organizationId, status: 'ACTIVE' } },
@@ -238,7 +253,7 @@ const resolveRequestVisibility = async ({ organizationId, actorId, access }) => 
     relevantSteps
       .filter((step) => {
         const departmentId = relevantDepartmentByRequest.get(String(step.requestId));
-        if (!departmentId || isDepartmentManager ||
+        if (!departmentId || isPersonalHistoryOnly ||
             !hasEffectivePermission(access, 'requests.approve', departmentId)) return false;
         const delegatedAssignment = isDelegatedForStep(requestVisibility, step, departmentId);
         const delegatedAction = step.actedOnBehalfOf &&
@@ -257,7 +272,11 @@ const resolveRequestVisibility = async ({ organizationId, actorId, access }) => 
     organizationId,
     access,
     isDepartmentManager,
+    isPersonalHistoryOnly,
     canViewOrganization,
+    isCustomRequestViewer: !isPersonalHistoryOnly &&
+      customRequestViewAssignments.length > 0,
+    customRequestViewDepartmentIds,
     relevantApprovalRequestIds,
     relevantSteps,
     delegatorIds: [...new Set(delegatorIds)],
@@ -265,11 +284,25 @@ const resolveRequestVisibility = async ({ organizationId, actorId, access }) => 
   };
 };
 
-const getRequestVisibilityFilter = ({ actorId, requestVisibility }) => {
-  const scopes = [{ requesterId: actorId }];
+export const getRequestVisibilityFilter = ({ actorId, requestVisibility }) => {
+  const scopes = [{ requesterId: new mongoose.Types.ObjectId(String(actorId)) }];
   if (requestVisibility.canViewOrganization) scopes.push({});
+  if (!requestVisibility.isPersonalHistoryOnly &&
+      requestVisibility.customRequestViewDepartmentIds.size) {
+    scopes.push({
+      departmentId: {
+        $in: [...requestVisibility.customRequestViewDepartmentIds]
+          .map((departmentId) => new mongoose.Types.ObjectId(departmentId)),
+      },
+    });
+  }
   if (requestVisibility.relevantApprovalRequestIds.size) {
-    scopes.push({ _id: { $in: [...requestVisibility.relevantApprovalRequestIds] } });
+    scopes.push({
+      _id: {
+        $in: [...requestVisibility.relevantApprovalRequestIds]
+          .map((requestId) => new mongoose.Types.ObjectId(String(requestId))),
+      },
+    });
   }
   return { $or: scopes };
 };
@@ -1031,4 +1064,5 @@ export default {
   createRequestType, listRequestTypes, getRequestTypeById, updateRequestType, setRequestTypeStatus,
   createRequest, getRequestById, listRequests, updateRequest, submitRequest, cancelRequest,
   resubmitRequest, getApprovalProgress, getApprovalHistory,
+  resolveRequestVisibility, getRequestVisibilityFilter,
 };

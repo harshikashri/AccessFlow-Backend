@@ -1182,7 +1182,7 @@ describe('Request management', () => {
     const privateEmployeeRole = await Role.create({
       organizationId: context.organizationId,
       name: 'Private Request Employee',
-      roleType: 'CUSTOM',
+      roleType: 'EMPLOYEE',
       permissions: DEPARTMENT_MEMBER_PERMISSIONS,
       status: 'ACTIVE',
       createdBy: context.admin._id,
@@ -1465,6 +1465,91 @@ describe('Request management', () => {
     expect(managed._id).toBeTruthy();
     expect(managerOwn._id).toBeTruthy();
     expect(adminOwn._id).toBeTruthy();
+  });
+
+  it('applies custom request.view department scope to request lists, search, details, and tracking', async () => {
+    const context = await setup('custom-request-view-scope');
+    const otherDepartment = await Department.create({
+      organizationId: context.organizationId,
+      name: 'Restricted Custom Viewer Department',
+      status: 'ACTIVE',
+    });
+    const viewer = await createUser({
+      email: 'custom-request-viewer@example.com',
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        status: 'ACTIVE',
+      }],
+    });
+    const viewerRole = await Role.create({
+      organizationId: context.organizationId,
+      name: 'Department Request Viewer',
+      roleType: 'CUSTOM',
+      permissions: ['requests.view'],
+      status: 'ACTIVE',
+      createdBy: context.admin._id,
+    });
+    await UserRoleAssignment.create({
+      userId: viewer._id,
+      roleId: viewerRole._id,
+      organizationId: context.organizationId,
+      departmentId: context.department._id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+      assignedBy: context.admin._id,
+    });
+    const viewerLogin = await loginRequest({ email: viewer.email, password: TEST_PASSWORD });
+    const requester = await createUser({
+      email: 'custom-request-scope-requester@example.com',
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        status: 'ACTIVE',
+      }],
+    });
+    const createScopedRequest = (departmentId, requestNumber) => Request.create({
+      organizationId: context.organizationId,
+      requesterId: requester._id,
+      requestNumber,
+      departmentId,
+      requestType: 'CUSTOM_SCOPE',
+      title: requestNumber,
+      details: {},
+      status: 'PENDING_APPROVAL',
+      currentSequence: 1,
+    });
+    const visibleRequest = await createScopedRequest(context.department._id, 'REQ-CUSTOM-SCOPE-001');
+    const hiddenRequest = await createScopedRequest(otherDepartment._id, 'REQ-CUSTOM-SCOPE-002');
+    const token = viewerLogin.body.data.accessToken;
+
+    const list = await request(app).get('/api/requests').set(authHeader(token));
+    const filteredSearch = await request(app)
+      .get('/api/requests/search')
+      .set(authHeader(token))
+      .query({
+        search: 'REQ-CUSTOM-SCOPE-002',
+        departmentId: String(otherDepartment._id),
+        userId: String(requester._id),
+      });
+    const visibleDetails = await request(app)
+      .get(`/api/requests/${visibleRequest._id}`)
+      .set(authHeader(token));
+    const hiddenDetails = await request(app)
+      .get(`/api/requests/${hiddenRequest._id}`)
+      .set(authHeader(token));
+    const hiddenProgress = await request(app)
+      .get(`/api/requests/${hiddenRequest._id}/approval-progress`)
+      .set(authHeader(token));
+
+    expect(viewerLogin.status).toBe(200);
+    expect(list.status).toBe(200);
+    expect(list.body.data.items.map((item) => item.id)).toEqual([String(visibleRequest._id)]);
+    expect(filteredSearch.status).toBe(200);
+    expect(filteredSearch.body.data.pagination.total).toBe(0);
+    expect(visibleDetails.status).toBe(200);
+    expect(hiddenDetails.status).toBe(404);
+    expect(hiddenProgress.status).toBe(404);
   });
 
   it('blocks inactive request types and invalid lifecycle transitions', async () => {

@@ -1,0 +1,11 @@
+export const DASHBOARD_DATE_RANGE_OPTIONS = [
+  'LAST_7_DAYS',
+  'LAST_30_DAYS',
+  'LAST_90_DAYS',
+  'THIS_MONTH',
+  'THIS_YEAR',
+  'CUSTOM',
+];
+
+export const MAX_CUSTOM_DATE_RANGE_DAYS = 366;
+export const DASHBOARD_TIME_ZONE = 'UTC';
