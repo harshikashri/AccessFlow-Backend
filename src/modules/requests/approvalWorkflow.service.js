@@ -10,6 +10,7 @@ import { WORKFLOW_ACTIONS } from './request.constants.js';
 import { validateWorkflowCondition } from './approvalWorkflow.validation.js';
 
 const FINANCE_APPROVER_ROLE_NAME = 'Finance Approver';
+const DEFAULT_FINANCE_CONDITION = { field: 'amount', operator: 'GREATER_THAN', value: 50000 };
 
 const publicWorkflow = (workflow) => ({
   id: String(workflow._id),
@@ -18,6 +19,8 @@ const publicWorkflow = (workflow) => ({
   name: workflow.name,
   description: workflow.description || '',
   requestTypeId: workflow.requestTypeId ? String(workflow.requestTypeId) : null,
+  selectionCondition: workflow.selectionCondition || null,
+  priority: workflow.priority ?? 0,
   version: workflow.version,
   isDefault: workflow.isDefault === true,
   isActive: workflow.isActive,
@@ -60,14 +63,30 @@ const findRequestType = async ({ organizationId, requestTypeId, session }) => {
   return type;
 };
 
-const validateReferences = async ({ organizationId, stages, requestType, session }) => {
+const validateReferences = async ({
+  organizationId,
+  stages,
+  requestType,
+  selectionCondition = null,
+  session,
+}) => {
   const fields = requestType?.fields || [{ key: 'amount', type: 'NUMBER', required: false }];
+  validateWorkflowCondition(selectionCondition, fields);
   for (const stage of stages) {
     validateWorkflowCondition(stage.condition, fields);
     if (stage.assignment.type === 'ROLE') {
       let query = Role.findOne({ _id: stage.assignment.roleId, organizationId, status: 'ACTIVE' });
       if (session) query = query.session(session);
-      if (!await query) throw new AppError('Approval role not found or inactive in this organization.', 404, 'ROLE_NOT_FOUND');
+      const role = await query;
+      if (!role) throw new AppError('Approval role not found or inactive in this organization.', 404, 'ROLE_NOT_FOUND');
+      if (!role.permissions?.includes('requests.approve')) {
+        throw new AppError('Approval roles must include the requests.approve permission.', 400, 'APPROVAL_PERMISSION_REQUIRED');
+      }
+      const isFinanceApprover =
+        role.roleType === 'FINANCE_APPROVER' || role.rolePurpose === 'FINANCE_APPROVER';
+      if (isFinanceApprover && stage.assignment.scopeType !== 'DEPARTMENT') {
+        throw new AppError('Finance Approver stages must use the request department scope.', 400, 'FINANCE_APPROVAL_SCOPE_REQUIRED');
+      }
     }
     if (stage.assignment.type === 'USER') {
       let query = User.findOne({
@@ -114,6 +133,35 @@ const latestVersion = async ({ organizationId, requestTypeId, isDefault, session
   return query;
 };
 
+const assertPriorityAvailable = async ({
+  organizationId,
+  requestTypeId,
+  priority,
+  exceptWorkflowId = null,
+  session,
+}) => {
+  const priorityFilter = priority === 0
+    ? { $or: [{ priority: 0 }, { priority: { $exists: false } }] }
+    : { priority };
+  const query = WorkflowDefinition.findOne({
+    organizationId,
+    definitionType: 'APPROVAL_WORKFLOW',
+    requestTypeId,
+    isDefault: false,
+    isActive: true,
+    ...(exceptWorkflowId ? { _id: { $ne: exceptWorkflowId } } : {}),
+    ...priorityFilter,
+  }).select('_id');
+  if (session) query.session(session);
+  if (await query) {
+    throw new AppError(
+      'An active workflow already uses this priority for the selected request type.',
+      409,
+      'WORKFLOW_PRIORITY_CONFLICT',
+    );
+  }
+};
+
 export const initializeDefaultApprovalWorkflow = async ({ session, organizationId, actorId }) => {
   const existing = await latestVersion({ organizationId, isDefault: true, session });
   if (existing) return existing;
@@ -152,6 +200,8 @@ export const initializeDefaultApprovalWorkflow = async ({ session, organizationI
     requestTypeId: null,
     isDefault: true,
     isActive: true,
+    selectionCondition: null,
+    priority: 0,
     version: 1,
     stages: [
       {
@@ -170,12 +220,17 @@ export const initializeDefaultApprovalWorkflow = async ({ session, organizationI
         sequence: 2,
         name: 'Finance Approval',
         approverType: 'ROLE',
-        assignment: { type: 'ROLE', roleId: role._id, resolution: 'CLAIM_ONE' },
+        assignment: {
+          type: 'ROLE',
+          roleId: role._id,
+          resolution: 'CLAIM_ONE',
+          scopeType: 'DEPARTMENT',
+        },
         roleId: role._id,
         approvalMode: 'ANY',
-        isMandatory: false,
+        isMandatory: true,
         isConfigurable: true,
-        condition: { field: 'amount', operator: 'GREATER_THAN', value: 50000 },
+        condition: { ...DEFAULT_FINANCE_CONDITION },
       },
     ],
     createdBy: actorId,
@@ -187,27 +242,60 @@ export const initializeDefaultApprovalWorkflow = async ({ session, organizationI
     actorId,
     action: WORKFLOW_ACTIONS.DEFAULT_INITIALIZED,
     resourceId: workflow._id,
-    changes: { version: 1, financeThreshold: 50000, financeRoleId: String(role._id) },
+    changes: {
+      version: 1,
+      financeRoleId: String(role._id),
+    },
   });
   return workflow;
 };
 
 export const createWorkflow = async ({ organizationId, actorId, input }) => withTransaction(async (session) => {
   await assertOrganization(organizationId, session);
-  if (!input.requestTypeId) {
+  const isDefault = input.isDefault === true;
+  const requestTypeId = isDefault ? null : input.requestTypeId;
+  if (!isDefault && !requestTypeId) {
     throw new AppError('Custom workflows must target a request type.', 400, 'REQUEST_TYPE_REQUIRED');
   }
-  const requestType = await findRequestType({ organizationId, requestTypeId: input.requestTypeId, session });
-  await validateReferences({ organizationId, stages: input.stages, requestType, session });
-  const duplicate = await latestVersion({ organizationId, requestTypeId: input.requestTypeId, isDefault: false, session });
-  if (duplicate?.isActive) throw new AppError('An active workflow already exists for this request type.', 409, 'WORKFLOW_EXISTS');
+  if (isDefault) {
+    const activeDefault = await WorkflowDefinition.exists({
+      organizationId,
+      definitionType: 'APPROVAL_WORKFLOW',
+      isDefault: true,
+      isActive: true,
+    }).session(session);
+    if (activeDefault) throw new AppError('An active organization default workflow already exists.', 409, 'DEFAULT_WORKFLOW_EXISTS');
+  }
+  const requestType = await findRequestType({ organizationId, requestTypeId, session });
+  const selectionCondition = input.selectionCondition ?? null;
+  const priority = input.priority ?? 0;
+  await validateReferences({
+    organizationId,
+    stages: input.stages,
+    requestType,
+    selectionCondition,
+    session,
+  });
+  if (!isDefault) {
+    await assertPriorityAvailable({
+      organizationId,
+      requestTypeId,
+      priority,
+      session,
+    });
+  } else if (selectionCondition) {
+    throw new AppError('The organization default workflow cannot have a selection condition.', 400, 'DEFAULT_WORKFLOW_CONDITION_INVALID');
+  }
   const workflow = new WorkflowDefinition({
     ...input,
     organizationId,
     definitionType: 'APPROVAL_WORKFLOW',
-    isDefault: false,
+    requestTypeId,
+    isDefault,
+    selectionCondition,
+    priority,
     isActive: true,
-    version: duplicate ? duplicate.version + 1 : 1,
+    version: 1,
     createdBy: actorId,
     updatedBy: actorId,
   });
@@ -240,23 +328,45 @@ export const updateWorkflow = async ({ organizationId, actorId, workflowId, inpu
   await assertOrganization(organizationId, session);
   const current = await WorkflowDefinition.findOne({ _id: workflowId, organizationId, definitionType: 'APPROVAL_WORKFLOW', isActive: true }).session(session);
   if (!current) throw new AppError('Active approval workflow not found.', 404, 'WORKFLOW_NOT_FOUND');
-  if (current.isDefault && input.requestTypeId) {
-    throw new AppError('The default workflow cannot be assigned to a specific request type.', 409, 'DEFAULT_WORKFLOW_PROTECTED');
+  if (input.isDefault !== undefined && input.isDefault !== current.isDefault) {
+    throw new AppError('A workflow cannot be converted between default and request-type scope while editing.', 409, 'WORKFLOW_SCOPE_IMMUTABLE');
   }
-  if (!current.isDefault && input.requestTypeId && String(input.requestTypeId) !== String(current.requestTypeId)) {
-    const conflicting = await latestVersion({ organizationId, requestTypeId: input.requestTypeId, isDefault: false, session });
-    if (conflicting?.isActive) throw new AppError('An active workflow already exists for this request type.', 409, 'WORKFLOW_EXISTS');
+  const stages = input.stages;
+  const requestTypeId = current.isDefault ? null : (input.requestTypeId ?? current.requestTypeId);
+  const requestType = await findRequestType({ organizationId, requestTypeId, session });
+  const selectionCondition = input.selectionCondition === undefined
+    ? current.selectionCondition || null
+    : input.selectionCondition;
+  const priority = input.priority ?? current.priority ?? 0;
+  await validateReferences({
+    organizationId,
+    stages,
+    requestType,
+    selectionCondition,
+    session,
+  });
+  if (!current.isDefault) {
+    await assertPriorityAvailable({
+      organizationId,
+      requestTypeId,
+      priority,
+      exceptWorkflowId: current._id,
+      session,
+    });
+  } else if (selectionCondition) {
+    throw new AppError('The organization default workflow cannot have a selection condition.', 400, 'DEFAULT_WORKFLOW_CONDITION_INVALID');
   }
-  const requestType = await findRequestType({ organizationId, requestTypeId: input.requestTypeId ?? current.requestTypeId, session });
-  await validateReferences({ organizationId, stages: input.stages, requestType, session });
   const next = new WorkflowDefinition({
     ...input,
     organizationId,
     definitionType: 'APPROVAL_WORKFLOW',
-    requestTypeId: input.requestTypeId ?? current.requestTypeId,
+    requestTypeId,
+    selectionCondition,
+    priority,
     isDefault: current.isDefault,
     isActive: true,
     version: current.version + 1,
+    stages,
     createdBy: current.createdBy,
     updatedBy: actorId,
   });
@@ -273,6 +383,38 @@ export const setWorkflowStatus = async ({ organizationId, actorId, workflowId, i
   const workflow = await WorkflowDefinition.findOne({ _id: workflowId, organizationId, definitionType: 'APPROVAL_WORKFLOW' }).session(session);
   if (!workflow) throw new AppError('Approval workflow not found.', 404, 'WORKFLOW_NOT_FOUND');
   if (!isActive && workflow.isDefault) throw new AppError('The default workflow cannot be deactivated.', 409, 'DEFAULT_WORKFLOW_PROTECTED');
+  if (isActive) {
+    const requestType = await findRequestType({
+      organizationId,
+      requestTypeId: workflow.isDefault ? null : workflow.requestTypeId,
+      session,
+    });
+    await validateReferences({
+      organizationId,
+      stages: workflow.stages,
+      requestType,
+      selectionCondition: workflow.selectionCondition || null,
+      session,
+    });
+    if (workflow.isDefault) {
+      const activeDefault = await WorkflowDefinition.exists({
+        organizationId,
+        definitionType: 'APPROVAL_WORKFLOW',
+        isDefault: true,
+        isActive: true,
+        _id: { $ne: workflow._id },
+      }).session(session);
+      if (activeDefault) throw new AppError('An active organization default workflow already exists.', 409, 'DEFAULT_WORKFLOW_EXISTS');
+    } else {
+      await assertPriorityAvailable({
+        organizationId,
+        requestTypeId: workflow.requestTypeId,
+        priority: workflow.priority ?? 0,
+        exceptWorkflowId: workflow._id,
+        session,
+      });
+    }
+  }
   workflow.isActive = isActive;
   workflow.updatedBy = actorId;
   await workflow.save({ session });
@@ -283,6 +425,18 @@ export const setWorkflowStatus = async ({ organizationId, actorId, workflowId, i
 export const validateWorkflow = async ({ organizationId, input }) => {
   await assertOrganization(organizationId);
   const requestType = await findRequestType({ organizationId, requestTypeId: input.requestTypeId });
-  await validateReferences({ organizationId, stages: input.stages, requestType });
+  await validateReferences({
+    organizationId,
+    stages: input.stages,
+    requestType,
+    selectionCondition: input.selectionCondition || null,
+  });
+  if (!input.isDefault) {
+    await assertPriorityAvailable({
+      organizationId,
+      requestTypeId: input.requestTypeId,
+      priority: input.priority ?? 0,
+    });
+  }
   return { valid: true };
 };

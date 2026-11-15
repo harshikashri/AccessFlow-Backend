@@ -31,11 +31,62 @@ const referencedFields = (condition, result = new Set()) => {
 const empty = (value) => value === undefined || value === null || value === '' ||
   (Array.isArray(value) && value.length === 0);
 
+const isValidDate = (value) =>
+  typeof value === 'string' && !Number.isNaN(Date.parse(value));
+
+const valueMatchesField = (field, value) => {
+  if (field.type === 'NUMBER') return typeof value === 'number' && Number.isFinite(value);
+  if (field.type === 'CHECKBOX') return typeof value === 'boolean';
+  if (field.type === 'DATE') return isValidDate(value);
+  if (field.type === 'SELECT') {
+    return typeof value === 'string' && field.options?.includes(value);
+  }
+  if (field.type === 'MULTI_SELECT') {
+    return typeof value === 'string' && field.options?.includes(value);
+  }
+  return ['TEXT', 'TEXTAREA'].includes(field.type) && typeof value === 'string';
+};
+
+const compatible = (field, operator, value) => {
+  const numericComparison = [
+    'GREATER_THAN',
+    'GREATER_THAN_OR_EQUAL',
+    'LESS_THAN',
+    'LESS_THAN_OR_EQUAL',
+  ].includes(operator);
+  if (numericComparison) {
+    return field.type === 'NUMBER'
+      ? typeof value === 'number' && Number.isFinite(value)
+      : field.type === 'DATE' && isValidDate(value);
+  }
+  if (operator === 'IS_EMPTY' || operator === 'IS_NOT_EMPTY') return true;
+  if (operator === 'IS_TRUE' || operator === 'IS_FALSE') return field.type === 'CHECKBOX';
+  if (operator === 'CONTAINS' || operator === 'NOT_CONTAINS') {
+    return (
+      (['TEXT', 'TEXTAREA', 'MULTI_SELECT'].includes(field.type)) &&
+      typeof value === 'string'
+    );
+  }
+  if (operator === 'IN' || operator === 'NOT_IN') {
+    return (
+      ['SELECT', 'MULTI_SELECT'].includes(field.type) &&
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.every((item) => valueMatchesField(field, item))
+    );
+  }
+  if (operator === 'EQUALS' || operator === 'NOT_EQUALS') {
+    return field.type !== 'MULTI_SELECT' && valueMatchesField(field, value);
+  }
+  return false;
+};
+
 const compare = (actual, operator, expected) => {
   if (operator === 'IS_EMPTY') return empty(actual);
   if (operator === 'IS_NOT_EMPTY') return !empty(actual);
   if (operator === 'IS_TRUE') return actual === true;
   if (operator === 'IS_FALSE') return actual === false;
+  if (empty(actual)) return false;
   if (operator === 'EQUALS') return actual === expected;
   if (operator === 'NOT_EQUALS') return actual !== expected;
   if (operator === 'CONTAINS' || operator === 'NOT_CONTAINS') {
@@ -45,30 +96,22 @@ const compare = (actual, operator, expected) => {
     return operator === 'CONTAINS' ? result : !result;
   }
   if (operator === 'IN' || operator === 'NOT_IN') {
-    const result = Array.isArray(expected) && expected.includes(actual);
+    const result = Array.isArray(actual)
+      ? actual.some((item) => expected.includes(item))
+      : expected.includes(actual);
     return operator === 'IN' ? result : !result;
   }
-  if (operator === 'GREATER_THAN') return actual > expected;
-  if (operator === 'GREATER_THAN_OR_EQUAL') return actual >= expected;
-  if (operator === 'LESS_THAN') return actual < expected;
-  if (operator === 'LESS_THAN_OR_EQUAL') return actual <= expected;
+  if (['GREATER_THAN', 'GREATER_THAN_OR_EQUAL', 'LESS_THAN', 'LESS_THAN_OR_EQUAL'].includes(operator)) {
+    const left = typeof actual === 'string' ? Date.parse(actual) : actual;
+    const right = typeof expected === 'string' ? Date.parse(expected) : expected;
+    if (typeof left !== 'number' || typeof right !== 'number' ||
+        !Number.isFinite(left) || !Number.isFinite(right)) return false;
+    if (operator === 'GREATER_THAN') return left > right;
+    if (operator === 'GREATER_THAN_OR_EQUAL') return left >= right;
+    if (operator === 'LESS_THAN') return left < right;
+    return left <= right;
+  }
   return false;
-};
-
-const compatible = (field, operator, value) => {
-  const numeric = ['NUMBER'];
-  const text = ['TEXT', 'TEXTAREA'];
-  const selection = ['SELECT', 'MULTI_SELECT'];
-  if (['GREATER_THAN', 'GREATER_THAN_OR_EQUAL', 'LESS_THAN', 'LESS_THAN_OR_EQUAL'].includes(operator) &&
-      !numeric.includes(field.type) && field.type !== 'DATE') return false;
-  if (['CONTAINS', 'NOT_CONTAINS'].includes(operator) && !text.includes(field.type) && field.type !== 'MULTI_SELECT') return false;
-  if (['IN', 'NOT_IN'].includes(operator) && !selection.includes(field.type)) return false;
-  if (['IS_TRUE', 'IS_FALSE'].includes(operator) && field.type !== 'CHECKBOX') return false;
-  if (numeric.includes(field.type) && ['GREATER_THAN', 'GREATER_THAN_OR_EQUAL', 'LESS_THAN', 'LESS_THAN_OR_EQUAL'].includes(operator) &&
-      (typeof value !== 'number' || !Number.isFinite(value))) return false;
-  if (selection.includes(field.type) && ['IN', 'NOT_IN'].includes(operator) &&
-      (!Array.isArray(value) || value.length === 0)) return false;
-  return true;
 };
 
 export const validateCondition = (condition, fields, controlledKey, depth = 0) => {
@@ -103,8 +146,10 @@ export const validateCondition = (condition, fields, controlledKey, depth = 0) =
 export const evaluateCondition = (condition, details, depth = 0) => {
   condition = normalizeCondition(condition);
   if (!condition) return true;
+  if (!condition || typeof condition !== 'object' || Array.isArray(condition)) return false;
   if (depth > MAX_DEPTH) return false;
   if (GROUPS.has(condition.operator)) {
+    if (!Array.isArray(condition.conditions) || !condition.conditions.length) return false;
     const results = condition.conditions.map((item) => evaluateCondition(item, details, depth + 1));
     return condition.operator === 'AND' ? results.every(Boolean) : results.some(Boolean);
   }

@@ -369,6 +369,65 @@ export const removeRoleAssignment = async ({ roleId, userId, organizationId, act
 		return { assignmentId: String(assignment._id), status: assignment.status };
 	});
 
+export const updateRoleAssignment = async ({ assignmentId, organizationId, actorId, access, scope }) =>
+	withTransaction(async (session) => {
+		await assertActiveOrganization(organizationId, session);
+		const assignment = await UserRoleAssignment.findOne({
+			_id: assignmentId,
+			organizationId,
+			status: 'ACTIVE',
+		}).session(session);
+		if (!assignment) throw new AppError('Active role assignment not found.', 404, 'ROLE_ASSIGNMENT_NOT_FOUND');
+
+		const role = await getRoleInOrganization({ roleId: assignment.roleId, organizationId, session });
+		const currentScope = {
+			scopeType: assignment.scopeType,
+			departmentId: assignment.departmentId ? String(assignment.departmentId) : null,
+		};
+		if (
+			currentScope.scopeType === scope.scopeType &&
+			currentScope.departmentId === (scope.departmentId || null)
+		) {
+			return toPublicAssignment(assignment);
+		}
+
+		const duplicate = await UserRoleAssignment.findOne({
+			_id: { $ne: assignment._id },
+			userId: assignment.userId,
+			organizationId,
+			roleId: assignment.roleId,
+			status: 'ACTIVE',
+			scopeType: scope.scopeType,
+			departmentId: scope.scopeType === 'ORGANIZATION' ? null : scope.departmentId,
+		}).session(session);
+		if (duplicate) {
+			throw new AppError('This role is already assigned at the requested scope.', 409, 'ROLE_ASSIGNMENT_EXISTS');
+		}
+
+		const [prepared] = await prepareRoleAssignments({
+			assignments: [{ ...scope, roleId: role._id }],
+			organizationId,
+			access,
+			session,
+			userId: assignment.userId,
+		});
+		assignment.scopeType = prepared.scopeType;
+		assignment.departmentId = prepared.departmentId;
+		await assignment.save({ session });
+		await writeAuditLog(session, {
+			organizationId,
+			actorId,
+			action: ROLE_ACTIONS.SCOPE_UPDATED,
+			resourceId: role._id,
+			changes: {
+				assignmentId: String(assignment._id),
+				userId: String(assignment.userId),
+				scope: { from: currentScope, to: { scopeType: assignment.scopeType, departmentId: assignment.departmentId ? String(assignment.departmentId) : null } },
+			},
+		});
+		return toPublicAssignment(assignment);
+	});
+
 export const listUserRoleAssignments = async ({ userId, organizationId, page, limit }) => {
 	await assertActiveOrganization(organizationId);
 	const user = await User.findOne({
@@ -424,6 +483,7 @@ export default {
 	setRoleStatus,
 	assignRole,
 	removeRoleAssignment,
+	updateRoleAssignment,
 	listUserRoleAssignments,
 	listRoleUsers,
 };

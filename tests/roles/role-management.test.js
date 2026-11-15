@@ -558,6 +558,50 @@ describe('Dynamic Role Management', () => {
     })).toBe(2);
   });
 
+  it('updates assignment scope atomically and preserves assignment eligibility checks', async () => {
+    const { organizationId, token } = await createOrganizationContext('scope-update');
+    const firstDepartment = await Department.create({ organizationId, name: 'Scope Update One' });
+    const secondDepartment = await Department.create({ organizationId, name: 'Scope Update Two' });
+    const user = await createActiveMember({ organizationId, email: 'scope-update@example.com' });
+    const role = await createRole(token, { name: 'Scope Update Role', permissions: ['users.view'] });
+    const created = await assignRole(token, role.body.data.id, {
+      userId: String(user._id),
+      scopeType: 'DEPARTMENT',
+      departmentId: String(firstDepartment._id),
+    });
+
+    const updated = await request(app)
+      .patch(`/api/roles/assignments/${created.body.data.id}`)
+      .set(authHeader(token))
+      .send({ scopeType: 'DEPARTMENT', departmentId: String(secondDepartment._id) });
+    expect(updated.status).toBe(200);
+    expect(updated.body.data).toMatchObject({
+      id: created.body.data.id,
+      scopeType: 'DEPARTMENT',
+      departmentId: String(secondDepartment._id),
+    });
+    expect(await UserRoleAssignment.countDocuments({
+      _id: created.body.data.id,
+      departmentId: secondDepartment._id,
+      status: 'ACTIVE',
+    })).toBe(1);
+    expect(await AuditLog.countDocuments({
+      action: 'ROLE_ASSIGNMENT_SCOPE_UPDATED',
+      resourceId: role.body.data.id,
+    })).toBe(1);
+
+    const invalid = await request(app)
+      .patch(`/api/roles/assignments/${created.body.data.id}`)
+      .set(authHeader(token))
+      .send({ scopeType: 'DEPARTMENT', departmentId: String(firstDepartment._id) });
+    expect(invalid.status).toBe(200);
+    expect(await UserRoleAssignment.countDocuments({
+      _id: created.body.data.id,
+      departmentId: firstDepartment._id,
+      status: 'ACTIVE',
+    })).toBe(1);
+  });
+
   it('rejects assignments to deactivated departments and invalid role scopes', async () => {
     const { organizationId, token } = await createOrganizationContext('assignment-validation');
     const department = await Department.create({ organizationId, name: 'Disabled Department' });
@@ -577,5 +621,34 @@ describe('Dynamic Role Management', () => {
     });
     expect(inactiveDepartment.status).toBe(400);
     expect(inactiveDepartment.body.code).toBe('INVALID_ROLE_DEPARTMENT');
+  });
+
+  it('requires Finance Approver roles to be assigned within a department', async () => {
+    const { organizationId, token } = await createOrganizationContext('finance-assignment-scope');
+    const department = await Department.create({ organizationId, name: 'Finance Assignment Scope' });
+    const user = await createActiveMember({
+      organizationId,
+      email: 'finance-assignment-scope@example.com',
+      departmentId: department._id,
+    });
+    const financeRole = await createRole(token, {
+      name: 'Department Finance Approver',
+      rolePurpose: 'FINANCE_APPROVER',
+      permissions: ['requests.approve'],
+    });
+
+    const organizationAssignment = await assignRole(token, financeRole.body.data.id, {
+      userId: String(user._id),
+      scopeType: 'ORGANIZATION',
+    });
+    expect(organizationAssignment.status).toBe(400);
+    expect(organizationAssignment.body.code).toBe('INVALID_ROLE_SCOPE');
+
+    const departmentAssignment = await assignRole(token, financeRole.body.data.id, {
+      userId: String(user._id),
+      scopeType: 'DEPARTMENT',
+      departmentId: String(department._id),
+    });
+    expect(departmentAssignment.status).toBe(201);
   });
 });

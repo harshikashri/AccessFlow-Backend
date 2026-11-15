@@ -362,6 +362,7 @@ describe('Dashboard analytics providers', () => {
       departmentId: context.departmentId,
       requestTypeId: null,
       requestTypeName: 'Legacy type A',
+      status: 'APPROVED',
     });
     await createRequest({
       organizationId: context.organizationId,
@@ -369,6 +370,7 @@ describe('Dashboard analytics providers', () => {
       departmentId: context.departmentId,
       requestTypeId: null,
       requestTypeName: 'Legacy type B',
+      status: 'APPROVED',
     });
     const foreignOrganizationId = new mongoose.Types.ObjectId();
     await Organization.create({

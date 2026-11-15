@@ -42,6 +42,26 @@ const approvalDelegationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const userPreferencesSchema = new mongoose.Schema(
+  {
+    language: { type: String, trim: true, maxlength: 20, default: 'en' },
+    timezone: { type: String, trim: true, maxlength: 100, default: 'UTC' },
+    dateFormat: { type: String, trim: true, maxlength: 30, default: 'YYYY-MM-DD' },
+    timeFormat: { type: String, enum: ['12h', '24h'], default: '24h' },
+    notifications: {
+      approvalTasks: { type: Boolean, default: true },
+      requestUpdates: { type: Boolean, default: true },
+      delegationUpdates: { type: Boolean, default: true },
+      slaReminders: { type: Boolean, default: true },
+      overdueAlerts: { type: Boolean, default: true },
+      escalationAlerts: { type: Boolean, default: true },
+      email: { type: Boolean, default: true },
+      inApp: { type: Boolean, default: true },
+    },
+  },
+  { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -94,6 +114,10 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: ['SUPER_ADMIN', null],
       default: null,
+    },
+    preferences: {
+      type: userPreferencesSchema,
+      default: () => ({}),
     },
   },
   { timestamps: true }

@@ -116,7 +116,7 @@ const setup = async (suffix = 'request') => {
   financeApprover.organizationMemberships = [{
     membershipId: new mongoose.Types.ObjectId(),
     organizationId,
-    departmentId: null,
+    departmentId: department._id,
     status: 'ACTIVE',
   }];
   await financeApprover.save();
@@ -145,8 +145,8 @@ const setup = async (suffix = 'request') => {
     userId: financeApprover._id,
     roleId: financeRole._id,
     organizationId,
-    departmentId: null,
-    scopeType: 'ORGANIZATION',
+    departmentId: department._id,
+    scopeType: 'DEPARTMENT',
     status: 'ACTIVE',
     assignedBy: admin._id,
   });
@@ -167,6 +167,7 @@ const setup = async (suffix = 'request') => {
     admin,
     member,
     manager,
+    financeApprover,
     department,
     adminToken: adminLogin.body.data.accessToken,
     memberToken: memberLogin.body.data.accessToken,
@@ -266,7 +267,8 @@ describe('Request management', () => {
       const value = stage.toObject();
       if (value.assignment.roleId) value.assignment.roleId = String(value.assignment.roleId);
       if (value.assignment.userId) value.assignment.userId = String(value.assignment.userId);
-      if (!value.sla?.duration) value.sla = null;
+      if (!value.sla?.duration) value.sla = {};
+      if (value.stageId === 'finance-approval') value.condition.value = 75000;
       return value;
     });
     const update = await request(app)
@@ -286,20 +288,56 @@ describe('Request management', () => {
       version: 2,
       description: 'Administrator customization',
     });
+    expect(update.body.data.stages.find((stage) => stage.stageId === 'finance-approval').condition)
+      .toEqual({ field: 'amount', operator: 'GREATER_THAN', value: 75000 });
+
+    const conditionClearedStages = update.body.data.stages.map((stage) => ({
+      ...stage,
+      condition: stage.stageId === 'finance-approval' ? null : stage.condition,
+    }));
+    const conditionOmittedUpdate = await request(app)
+      .patch(`/api/approval-workflows/${update.body.data.id}`)
+      .set(authHeader(context.adminToken))
+      .send({
+        name: update.body.data.name,
+        description: update.body.data.description,
+        requestTypeId: null,
+        stages: conditionClearedStages,
+      });
+    expect(conditionOmittedUpdate.status, JSON.stringify(conditionOmittedUpdate.body)).toBe(200);
+    expect(conditionOmittedUpdate.body.data.stages.find((stage) => stage.stageId === 'finance-approval').condition)
+      .toBeNull();
+
+    const invalidStages = update.body.data.stages.map((stage) => ({
+      ...stage,
+      sla: stage.stageId === 'department-manager-approval'
+        ? { duration: 0, unit: 'HOURS' }
+        : stage.sla,
+    }));
+    const invalidUpdate = await request(app)
+      .patch(`/api/approval-workflows/${conditionOmittedUpdate.body.data.id}`)
+      .set(authHeader(context.adminToken))
+      .send({
+        name: update.body.data.name,
+        description: update.body.data.description,
+        requestTypeId: null,
+        stages: invalidStages,
+      });
+    expect(invalidUpdate.status).toBe(400);
 
     const listed = await request(app)
       .get('/api/approval-workflows?isActive=true')
       .set(authHeader(context.adminToken));
     expect(listed.status).toBe(200);
     expect(listed.body.data.pagination.total).toBe(1);
-    expect(listed.body.data.items[0].id).toBe(update.body.data.id);
+    expect(listed.body.data.items[0].id).toBe(conditionOmittedUpdate.body.data.id);
 
     const initializedAgain = await withTransaction((session) => initializeDefaultApprovalWorkflow({
       session,
       organizationId: context.organizationId,
       actorId: context.admin._id,
     }));
-    expect(String(initializedAgain._id)).toBe(update.body.data.id);
+    expect(String(initializedAgain._id)).toBe(conditionOmittedUpdate.body.data.id);
     expect(initializedAgain.description).toBe('Administrator customization');
     expect(await WorkflowDefinition.countDocuments({
       organizationId: context.organizationId,
@@ -307,7 +345,7 @@ describe('Request management', () => {
       isDefault: true,
       isActive: true,
     })).toBe(1);
-    workflow = await WorkflowDefinition.findById(update.body.data.id);
+    workflow = await WorkflowDefinition.findById(conditionOmittedUpdate.body.data.id);
     expect(workflow.isActive).toBe(true);
   });
 
@@ -316,6 +354,7 @@ describe('Request management', () => {
     const purchaseType = await createPurchaseType(context.adminToken, {
       code: 'PURCHASE_FINANCE_CONDITION',
     });
+
     expect(purchaseType.status).toBe(201);
     const purchaseCases = [
       { amount: 30000, financeStatus: 'SKIPPED' },
@@ -409,6 +448,309 @@ describe('Request management', () => {
       assignmentResolution: 'CLAIM_ONE',
     });
     expect(nonPurchaseSteps.find((step) => step.stageId === 'finance-approval')?.status).toBe('SKIPPED');
+  });
+
+  it('selects the highest-priority matching request workflow and falls back to the organization default', async () => {
+    const context = await setup('conditional-workflow-selection');
+    const purchaseType = await createPurchaseType(context.adminToken, {
+      code: 'PURCHASE-WORKFLOW-SELECTION',
+    });
+    expect(purchaseType.status).toBe(201);
+    const managerStage = {
+      stageId: 'department-manager-approval',
+      sequence: 1,
+      name: 'Department Manager Approval',
+      description: '',
+      approverType: 'DEPARTMENT_MANAGER',
+      assignment: { type: 'DEPARTMENT_MANAGER', resolution: 'CLAIM_ONE' },
+      approvalMode: 'ANY',
+      isMandatory: true,
+      isConfigurable: false,
+      condition: null,
+    };
+    const createConditionalWorkflow = (name, priority, threshold) => request(app)
+      .post('/api/approval-workflows')
+      .set(authHeader(context.adminToken))
+      .send({
+        name,
+        description: '',
+        requestTypeId: purchaseType.body.data.id,
+        isDefault: false,
+        priority,
+        selectionCondition: {
+          operator: 'AND',
+          conditions: [
+            { field: 'estimatedCost', operator: 'GREATER_THAN', value: threshold },
+            { field: 'estimatedCost', operator: 'LESS_THAN', value: 1000000 },
+          ],
+        },
+        stages: [managerStage],
+      });
+    const lowerPriority = await createConditionalWorkflow('Purchase over 50000', 5, 50000);
+    const higherPriority = await createConditionalWorkflow('Purchase over 75000', 10, 75000);
+    expect(lowerPriority.status, JSON.stringify(lowerPriority.body)).toBe(201);
+    expect(higherPriority.status, JSON.stringify(higherPriority.body)).toBe(201);
+
+    const submitPurchase = async (estimatedCost, title) => {
+      const created = await request(app)
+        .post('/api/requests')
+        .set(authHeader(context.memberToken))
+        .send({
+          departmentId: String(context.department._id),
+          requestTypeId: purchaseType.body.data.id,
+          title,
+          details: {
+            itemName: title,
+            quantity: 1,
+            estimatedCost,
+            justification: 'Workflow selection test.',
+          },
+        });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const submitted = await request(app)
+        .post(`/api/requests/${created.body.data.id}/submit`)
+        .set(authHeader(context.memberToken))
+        .send({});
+      expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
+      return Request.findById(created.body.data.id);
+    };
+
+    expect(String((await submitPurchase(80000, 'High-cost purchase')).workflowDefinitionId))
+      .toBe(higherPriority.body.data.id);
+    expect(String((await submitPurchase(60000, 'Mid-cost purchase')).workflowDefinitionId))
+      .toBe(lowerPriority.body.data.id);
+    const fallback = await WorkflowDefinition.findOne({
+      organizationId: context.organizationId,
+      definitionType: 'APPROVAL_WORKFLOW',
+      isDefault: true,
+      isActive: true,
+    });
+    expect(String((await submitPurchase(30000, 'Low-cost purchase')).workflowDefinitionId))
+      .toBe(String(fallback._id));
+  });
+
+  it('exposes an active Finance approval to every assigned finance approver and permits the claimant to act', async () => {
+    const context = await setup('multiple-finance-approvers');
+    const secondFinanceApprover = await createUser({
+      email: 'request-finance-second-multiple@example.com',
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        status: 'ACTIVE',
+      }],
+    });
+    const financeRole = await Role.findOne({
+      organizationId: context.organizationId,
+      roleType: 'FINANCE_APPROVER',
+      status: 'ACTIVE',
+    });
+    const customFinanceRole = await Role.create({
+      organizationId: context.organizationId,
+      name: 'Custom Finance Approver',
+      roleType: 'CUSTOM',
+      rolePurpose: 'FINANCE_APPROVER',
+      permissions: ['requests.approve'],
+      status: 'ACTIVE',
+      createdBy: context.admin._id,
+    });
+    await UserRoleAssignment.create({
+      userId: secondFinanceApprover._id,
+      roleId: financeRole._id,
+      organizationId: context.organizationId,
+      departmentId: context.department._id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+      assignedBy: context.admin._id,
+    });
+    await UserRoleAssignment.create([
+      {
+        userId: context.financeApprover._id,
+        roleId: customFinanceRole._id,
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        scopeType: 'DEPARTMENT',
+        status: 'ACTIVE',
+        assignedBy: context.admin._id,
+      },
+      {
+        userId: secondFinanceApprover._id,
+        roleId: customFinanceRole._id,
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        scopeType: 'DEPARTMENT',
+        status: 'ACTIVE',
+        assignedBy: context.admin._id,
+      },
+    ]);
+    const otherDepartment = await Department.create({
+      organizationId: context.organizationId,
+      name: 'Finance Test Other Department',
+    });
+    const otherDepartmentFinance = await createUser({
+      email: 'request-finance-other-department@example.com',
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: otherDepartment._id,
+        status: 'ACTIVE',
+      }],
+    });
+    await UserRoleAssignment.create({
+      userId: otherDepartmentFinance._id,
+      roleId: financeRole._id,
+      organizationId: context.organizationId,
+      departmentId: otherDepartment._id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+      assignedBy: context.admin._id,
+    });
+    const otherDepartmentFinanceLogin = await loginRequest({
+      email: otherDepartmentFinance.email,
+      password: TEST_PASSWORD,
+    });
+    const memberRole = await Role.findOne({
+      organizationId: context.organizationId,
+      name: 'Request Contributor',
+      status: 'ACTIVE',
+    });
+    await UserRoleAssignment.create({
+      userId: context.financeApprover._id,
+      roleId: memberRole._id,
+      organizationId: context.organizationId,
+      departmentId: null,
+      scopeType: 'ORGANIZATION',
+      status: 'ACTIVE',
+      assignedBy: context.admin._id,
+    });
+    const secondFinanceLogin = await loginRequest({
+      email: secondFinanceApprover.email,
+      password: TEST_PASSWORD,
+    });
+    const purchaseType = await createPurchaseType(context.adminToken, {
+      code: 'PURCHASE-MULTIPLE-FINANCE',
+    });
+    const customFinanceWorkflow = await request(app)
+      .post('/api/approval-workflows')
+      .set(authHeader(context.adminToken))
+      .send({
+        name: 'Custom Finance Approval Workflow',
+        description: '',
+        requestTypeId: purchaseType.body.data.id,
+        isDefault: false,
+        priority: 10,
+        selectionCondition: null,
+        stages: [
+          {
+            stageId: 'department-manager-approval',
+            sequence: 1,
+            name: 'Department Manager Approval',
+            description: '',
+            approverType: 'DEPARTMENT_MANAGER',
+            assignment: { type: 'DEPARTMENT_MANAGER', resolution: 'CLAIM_ONE' },
+            approvalMode: 'ANY',
+            isMandatory: true,
+            isConfigurable: false,
+            condition: null,
+          },
+          {
+            stageId: 'finance-approval',
+            sequence: 2,
+            name: 'Finance Approval',
+            description: '',
+            approverType: 'ROLE',
+            assignment: {
+              type: 'ROLE',
+              roleId: String(customFinanceRole._id),
+              resolution: 'CLAIM_ONE',
+              scopeType: 'DEPARTMENT',
+            },
+            roleId: String(customFinanceRole._id),
+            approvalMode: 'ANY',
+            isMandatory: true,
+            isConfigurable: true,
+            condition: null,
+          },
+        ],
+      });
+    expect(customFinanceWorkflow.status, JSON.stringify(customFinanceWorkflow.body)).toBe(201);
+    const created = await request(app)
+      .post('/api/requests')
+      .set(authHeader(context.memberToken))
+      .send({
+        departmentId: String(context.department._id),
+        requestTypeId: purchaseType.body.data.id,
+        title: 'Multiple finance approver request',
+        details: {
+          itemName: 'Monitor',
+          quantity: 1,
+          estimatedCost: 80000,
+          justification: 'Multiple approver test',
+        },
+      });
+    await request(app)
+      .post(`/api/requests/${created.body.data.id}/submit`)
+      .set(authHeader(context.memberToken))
+      .send({});
+    const managerInbox = await request(app)
+      .get('/api/approvals/inbox')
+      .set(authHeader(context.managerToken))
+      .query({ category: 'available' });
+    const managerApproval = managerInbox.body.data.items.find(
+      (item) => item.requestId === created.body.data.id,
+    );
+    await request(app)
+      .post(`/api/approvals/${managerApproval._id}/claim`)
+      .set(authHeader(context.managerToken))
+      .send({});
+    await request(app)
+      .post(`/api/approvals/${managerApproval._id}/approve`)
+      .set(authHeader(context.managerToken))
+      .send({ comment: 'Manager approved.' });
+
+    const firstFinanceInbox = await request(app)
+      .get('/api/approvals/inbox')
+      .set(authHeader(context.financeToken))
+      .query({ category: 'available' });
+    const secondFinanceInbox = await request(app)
+      .get('/api/approvals/inbox')
+      .set(authHeader(secondFinanceLogin.body.data.accessToken))
+      .query({ category: 'available' });
+    const otherDepartmentInbox = await request(app)
+      .get('/api/approvals/inbox')
+      .set(authHeader(otherDepartmentFinanceLogin.body.data.accessToken))
+      .query({ category: 'available' });
+    expect(firstFinanceInbox.body.data.items.map((item) => item.requestId)).toContain(created.body.data.id);
+    expect(secondFinanceInbox.body.data.items.map((item) => item.requestId)).toContain(created.body.data.id);
+    expect(otherDepartmentInbox.body.data.items.map((item) => item.requestId))
+      .not.toContain(created.body.data.id);
+    const financeApproval = firstFinanceInbox.body.data.items.find(
+      (item) => item.requestId === created.body.data.id,
+    );
+    const secondFinanceApproval = secondFinanceInbox.body.data.items.find(
+      (item) => item.requestId === created.body.data.id,
+    );
+    const [firstClaim, secondClaim] = await Promise.all([
+      request(app)
+        .post(`/api/approvals/${financeApproval._id}/claim`)
+        .set(authHeader(context.financeToken))
+        .send({}),
+      request(app)
+        .post(`/api/approvals/${secondFinanceApproval._id}/claim`)
+        .set(authHeader(secondFinanceLogin.body.data.accessToken))
+        .send({}),
+    ]);
+    expect([firstClaim.status, secondClaim.status].sort()).toEqual([200, 409]);
+    const winningToken =
+      firstClaim.status === 200
+        ? context.financeToken
+        : secondFinanceLogin.body.data.accessToken;
+    const winningStepId =
+      firstClaim.status === 200 ? financeApproval._id : secondFinanceApproval._id;
+    const approved = await request(app)
+      .post(`/api/approvals/${winningStepId}/approve`)
+      .set(authHeader(winningToken))
+      .send({ comment: 'Finance approved.' });
+    expect(approved.status).toBe(200);
+    expect((await Request.findById(created.body.data.id)).status).toBe('APPROVED');
   });
 
   it('maps and safely migrates legacy Purchase Request amount fields without changing other configuration', async () => {
@@ -1162,8 +1504,7 @@ describe('Request management', () => {
     const foreign = await request(app)
       .get(`/api/requests/${created.body.data.id}`)
       .set(authHeader(context.adminToken));
-    expect(foreign.status).toBe(200);
-    expect(foreign.body.data.id).toBe(created.body.data.id);
+    expect(foreign.status).toBe(404);
 
     const invalidDetails = await request(app)
       .patch(`/api/requests/${created.body.data.id}`)
@@ -1213,7 +1554,7 @@ describe('Request management', () => {
       email: 'visibility-manager@example.com',
       organizationMemberships: [{
         organizationId: context.organizationId,
-        departmentId: departmentB._id,
+        departmentId: context.department._id,
         status: 'ACTIVE',
       }],
     });
@@ -1348,9 +1689,9 @@ describe('Request management', () => {
       .get('/api/requests')
       .set(authHeader(context.adminToken));
     expect(adminList.status).toBe(200);
-    expect(adminList.body.data.pagination.total).toBe(7);
+    expect(adminList.body.data.pagination.total).toBe(4);
     expect(adminList.body.data.items.map((item) => item.requestNumber).sort()).toEqual(
-      ['REQ-VIS-001', 'REQ-VIS-002', 'REQ-VIS-003', 'REQ-VIS-004', 'REQ-VIS-005', 'REQ-VIS-006', 'REQ-VIS-007'].sort()
+      ['REQ-VIS-002', 'REQ-VIS-003', 'REQ-VIS-004', 'REQ-VIS-006'].sort()
     );
 
     const adminDetails = await request(app)
@@ -1358,6 +1699,10 @@ describe('Request management', () => {
       .set(authHeader(context.adminToken));
     expect(adminDetails.status).toBe(200);
     expect(adminDetails.body.data.id).toBe(String(unrelated._id));
+    const adminOtherDraftDetails = await request(app)
+      .get(`/api/requests/${managerOwn._id}`)
+      .set(authHeader(context.adminToken));
+    expect(adminOtherDraftDetails.status).toBe(404);
     const managerDraftDetails = await request(app)
       .get(`/api/requests/${colleague._id}`)
       .set(authHeader(managerLogin.body.data.accessToken));
@@ -1455,8 +1800,7 @@ describe('Request management', () => {
     const adminDraftDetails = await request(app)
       .get(`/api/requests/${own._id}`)
       .set(authHeader(context.adminToken));
-    expect(adminDraftDetails.status).toBe(200);
-    expect(adminDraftDetails.body.data.id).toBe(String(own._id));
+    expect(adminDraftDetails.status).toBe(404);
     expect(managerLogin.body.data.accessToken).toBeTruthy();
     expect(secondManagerLogin.body.data.accessToken).toBeTruthy();
     expect(otherMemberLogin.body.data.accessToken).toBeTruthy();

@@ -32,7 +32,15 @@ const audit = async (session, { organizationId, actorId, action, resourceId, cha
   }], { session });
 };
 
-const workflowForRequest = async ({ organizationId, requestTypeId, workflowDefinitionId, workflowVersion, session }) => {
+const workflowForRequest = async ({
+  organizationId,
+  requestTypeId,
+  workflowDefinitionId,
+  workflowVersion,
+  details = {},
+  amount = null,
+  session,
+}) => {
   if (workflowDefinitionId) {
     const snapshot = await WorkflowDefinition.findOne({
       _id: workflowDefinitionId,
@@ -43,39 +51,107 @@ const workflowForRequest = async ({ organizationId, requestTypeId, workflowDefin
     if (!snapshot) throw new AppError('The approval workflow snapshot is unavailable.', 409, 'WORKFLOW_NOT_FOUND');
     return snapshot;
   }
-  const exact = await WorkflowDefinition.findOne({
-    organizationId, definitionType: 'APPROVAL_WORKFLOW', requestTypeId, isActive: true,
+  const candidates = await WorkflowDefinition.find({
+    organizationId,
+    definitionType: 'APPROVAL_WORKFLOW',
+    isActive: true,
+    $or: [{ requestTypeId }, { isDefault: true }],
   }).session(session);
-  if (exact) return exact;
-  const fallback = await WorkflowDefinition.findOne({
-    organizationId, definitionType: 'APPROVAL_WORKFLOW', isDefault: true, isActive: true,
-  }).session(session);
-  if (!fallback) throw new AppError('No active approval workflow is configured for this organization.', 409, 'WORKFLOW_NOT_FOUND');
-  return fallback;
+  const conditionData = { ...(details || {}) };
+  if (amount !== null && amount !== undefined) conditionData.amount = amount;
+  const matching = candidates
+    .filter((workflow) =>
+      !workflow.isDefault &&
+      String(workflow.requestTypeId) === String(requestTypeId) &&
+      evaluateCondition(workflow.selectionCondition, conditionData))
+    .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0));
+  if (matching.length) {
+    const highestPriority = matching[0].priority ?? 0;
+    const highestPriorityMatches = matching.filter(
+      (workflow) => (workflow.priority ?? 0) === highestPriority,
+    );
+    if (highestPriorityMatches.length !== 1) {
+      throw new AppError(
+        'Multiple active workflows match this request at the same priority.',
+        409,
+        'AMBIGUOUS_WORKFLOW',
+      );
+    }
+    return highestPriorityMatches[0];
+  }
+  const defaults = candidates.filter((workflow) => workflow.isDefault);
+  if (defaults.length !== 1) {
+    throw new AppError(
+      defaults.length ? 'Multiple active organization default workflows are configured.' : 'No active approval workflow matches this request and no active default fallback is configured.',
+      409,
+      defaults.length ? 'AMBIGUOUS_DEFAULT_WORKFLOW' : 'WORKFLOW_NOT_FOUND',
+    );
+  }
+  return defaults[0];
 };
 
-const activeUsers = async ({ organizationId, userIds, session }) => {
+const activeUsers = async ({ organizationId, userIds, departmentId = null, session }) => {
   if (!userIds.length) return [];
   return User.find({
     _id: { $in: userIds },
     accountStatus: 'ACTIVE',
-    organizationMemberships: { $elemMatch: { organizationId, status: 'ACTIVE' } },
+    organizationMemberships: {
+      $elemMatch: {
+        organizationId,
+        status: 'ACTIVE',
+        ...(departmentId ? { departmentId } : {}),
+      },
+    },
   }).select('_id').session(session);
 };
 
-const assignmentsForUsers = async ({ organizationId, userIds, roleType, roleId, departmentId, session }) => {
+const assignmentsForUsers = async ({
+  organizationId,
+  userIds,
+  roleType,
+  roleId,
+  departmentId,
+  scopeType,
+  requireDepartmentMembership = true,
+  session,
+}) => {
   const roleFilter = roleId ? { _id: roleId } : { roleType };
   const roles = await Role.find({ organizationId, status: 'ACTIVE', ...roleFilter }).select('_id roleType').session(session);
   const roleIds = roles.map((role) => role._id);
   if (!roleIds.length) return [];
+  let scopeFilter = {};
+  if (scopeType === 'DEPARTMENT') {
+    scopeFilter = { scopeType: 'DEPARTMENT', departmentId };
+  } else if (scopeType === 'ORGANIZATION') {
+    scopeFilter = { scopeType: 'ORGANIZATION', departmentId: null };
+  } else if (scopeType === 'ORGANIZATION_OR_DEPARTMENT' && departmentId) {
+    scopeFilter = {
+      $or: [
+        { scopeType: 'ORGANIZATION', departmentId: null },
+        { scopeType: 'DEPARTMENT', departmentId },
+      ],
+    };
+  } else if (departmentId) {
+    scopeFilter = {
+      $or: [
+        { scopeType: 'ORGANIZATION', departmentId: null },
+        { scopeType: 'DEPARTMENT', departmentId },
+      ],
+    };
+  }
   const assignments = await UserRoleAssignment.find({
     organizationId,
     userId: { $in: userIds },
     roleId: { $in: roleIds },
     status: 'ACTIVE',
-    ...(departmentId ? { $or: [{ scopeType: 'ORGANIZATION', departmentId: null }, { scopeType: 'DEPARTMENT', departmentId }] } : {}),
+    ...scopeFilter,
   }).select('userId roleId').session(session);
-  const eligible = await activeUsers({ organizationId, userIds: assignments.map((item) => item.userId), session });
+  const eligible = await activeUsers({
+    organizationId,
+    userIds: assignments.map((item) => item.userId),
+    departmentId: requireDepartmentMembership && scopeType === 'DEPARTMENT' ? departmentId : null,
+    session,
+  });
   return eligible.map((user) => user._id);
 };
 
@@ -91,18 +167,47 @@ const resolveApprovers = async ({ organizationId, request, stage, session }) => 
       userIds: department.managerIds.filter((id) => String(id) !== String(request.requesterId)),
       roleType: 'DEPARTMENT_MANAGER',
       departmentId: request.departmentId,
+      scopeType: 'DEPARTMENT',
+      requireDepartmentMembership: false,
       session,
     });
   }
   if (stage.approverType === 'ROLE') {
+    const roleId = assignment.roleId || stage.roleId;
+    const role = await Role.findOne({
+      _id: roleId,
+      organizationId,
+      status: 'ACTIVE',
+    }).select('roleType rolePurpose permissions').session(session);
+    if (!role) return [];
+    if (!role.permissions?.includes('requests.approve')) {
+      throw new AppError('The configured approval role no longer grants requests.approve.', 409, 'APPROVAL_PERMISSION_REQUIRED');
+    }
+    const isFinanceApprover =
+      role.roleType === 'FINANCE_APPROVER' || role.rolePurpose === 'FINANCE_APPROVER';
+    const scopeType = assignment.scopeType || (isFinanceApprover ? 'DEPARTMENT' : null);
+    if (isFinanceApprover && scopeType !== 'DEPARTMENT') {
+      throw new AppError('Finance Approvers must be assigned within the request department.', 409, 'FINANCE_APPROVAL_SCOPE_REQUIRED');
+    }
+    if (scopeType === 'DEPARTMENT') {
+      const department = await Department.findOne({
+        _id: request.departmentId,
+        organizationId,
+        status: 'ACTIVE',
+      }).select('_id').session(session);
+      if (!department) throw new AppError('The request department is unavailable.', 409, 'DEPARTMENT_NOT_FOUND');
+    }
+    const userIds = await User.find({
+      organizationMemberships: { $elemMatch: { organizationId, status: 'ACTIVE' } },
+      accountStatus: 'ACTIVE',
+      _id: { $ne: request.requesterId },
+    }).distinct('_id').session(session);
     return assignmentsForUsers({
       organizationId,
-      userIds: await User.find({
-        organizationMemberships: { $elemMatch: { organizationId, status: 'ACTIVE' } },
-        accountStatus: 'ACTIVE',
-      }).distinct('_id').session(session),
-      roleId: assignment.roleId || stage.roleId,
+      userIds,
+      roleId,
       departmentId: request.departmentId,
+      scopeType,
       session,
     });
   }
@@ -118,6 +223,7 @@ const resolveApprovers = async ({ organizationId, request, stage, session }) => 
       organizationId,
       userIds: userIds.filter((id) => String(id) !== String(request.requesterId)),
       roleType: 'ORGANIZATION_ADMIN',
+      scopeType: 'ORGANIZATION',
       session,
     });
   }
@@ -135,6 +241,8 @@ export const createRuntimeApprovals = async ({
     requestTypeId: request.requestTypeId,
     workflowDefinitionId,
     workflowVersion,
+    details: request.details,
+    amount: request.amount,
     session,
   });
   const existing = await ApprovalStep.exists({ requestId: request._id, attemptNumber }).session(session);
@@ -211,6 +319,16 @@ const getActionContext = async ({ organizationId, approvalStepId, actorId, acces
   const request = await Request.findOne({ _id: step.requestId, organizationId }).session(session);
   if (!request) throw new AppError('Request not found.', 404, 'REQUEST_NOT_FOUND');
   if (request.status !== 'PENDING_APPROVAL') throw new AppError('This request is not awaiting approval.', 409, 'INVALID_REQUEST_STATUS');
+  if (request.currentSequence !== step.sequence) {
+    throw new AppError("This approval is not the request's current stage.", 409, 'APPROVAL_NOT_ACTIONABLE');
+  }
+  const latestAttempt = await ApprovalStep.findOne({
+    organizationId,
+    requestId: request._id,
+  }).sort({ attemptNumber: -1 }).select('attemptNumber').session(session);
+  if (latestAttempt?.attemptNumber !== step.attemptNumber) {
+    throw new AppError('This approval belongs to an earlier submission attempt.', 409, 'APPROVAL_NOT_ACTIONABLE');
+  }
   if (String(request.requesterId) === String(actorId)) {
     throw new AppError('Requesters cannot approve their own requests.', 403, 'SELF_APPROVAL_FORBIDDEN');
   }
@@ -236,6 +354,24 @@ const getActionContext = async ({ organizationId, approvalStepId, actorId, acces
     }).session(session);
     if (activeClaim) throw new AppError('This approval is claimed by another approver.', 409, 'APPROVAL_CLAIMED');
   }
+  const workflow = await WorkflowDefinition.findOne({
+    _id: step.workflowDefinitionId,
+    organizationId,
+    version: step.workflowVersion,
+  }).select('stages').session(session);
+  const workflowStage = workflow?.stages.find((stage) => stage.stageId === step.stageId);
+  if (!workflowStage) {
+    throw new AppError('The approval stage configuration is unavailable.', 409, 'WORKFLOW_NOT_FOUND');
+  }
+  const eligibleApprovers = await resolveApprovers({
+    organizationId,
+    request,
+    stage: workflowStage,
+    session,
+  });
+  if (!eligibleApprovers.some((id) => String(id) === String(step.approverId))) {
+    throw new AppError('The assigned approver is no longer eligible for this department and role.', 403, 'FORBIDDEN');
+  }
   let delegation = null;
   if (String(step.approverId) !== String(actorId)) {
     delegation = await activeDelegationFor({
@@ -247,12 +383,7 @@ const getActionContext = async ({ organizationId, approvalStepId, actorId, acces
     });
     if (!delegation) throw new AppError('You are not eligible for this approval.', 403, 'FORBIDDEN');
   }
-  const workflow = await WorkflowDefinition.findOne({
-    _id: step.workflowDefinitionId,
-    organizationId,
-    version: step.workflowVersion,
-  }).select('stages').session(session);
-  return { step, request, delegation, workflowStage: workflow?.stages.find((stage) => stage.stageId === step.stageId) };
+  return { step, request, delegation, workflowStage };
 };
 
 export const claimApproval = async ({ organizationId, approvalStepId, actorId, access, session }) => {
@@ -476,13 +607,12 @@ const approvalVisibilityFilter = ({ organizationId, actorId, approverIds, query 
   } else if (query.category === 'all') {
     filter.$or = [
       { status: 'ACTIVE', claimedBy: null },
-      { status: 'PENDING', claimedBy: null },
       { status: 'CLAIMED', claimedBy: actorId },
       { decidedBy: actorId },
     ];
   } else {
     filter.$or = [
-      { status: { $in: ['ACTIVE', 'PENDING'] }, claimedBy: null },
+      { status: 'ACTIVE', claimedBy: null },
       { status: 'CLAIMED', claimedBy: actorId },
       { decidedBy: actorId },
     ];
@@ -490,13 +620,97 @@ const approvalVisibilityFilter = ({ organizationId, actorId, approverIds, query 
   return filter;
 };
 
-const enrichApprovalSteps = async (steps) => {
+const enrichApprovalSteps = async (organizationId, steps) => {
   const requestIds = [...new Set(steps.map((step) => String(step.requestId)))];
+  const roleIds = [...new Set(steps.map((step) => step.roleId && String(step.roleId)).filter(Boolean))];
   const requests = await Request.find({ _id: { $in: requestIds } })
     .select('requestNumber requestTypeId requestTypeName title requesterId departmentId status currentSequence submittedAt')
     .lean();
   const requestMap = new Map(requests.map((request) => [String(request._id), request]));
-  return steps.map((step) => ({ ...step, request: requestMap.get(String(step.requestId)) || null }));
+  const roles = roleIds.length
+    ? await Role.find({ _id: { $in: roleIds }, organizationId }).select('_id name').lean()
+    : [];
+  const roleNameMap = new Map(roles.map((role) => [String(role._id), role.name]));
+  return steps.map((step) => ({
+    ...step,
+    approverRoleName: step.roleId ? roleNameMap.get(String(step.roleId)) || null : null,
+    request: requestMap.get(String(step.requestId)) || null,
+  }));
+};
+
+export const reconcileCurrentRoleApproverStep = async ({ organizationId, actorId }) => {
+  const requests = await Request.find({
+    organizationId,
+    status: 'PENDING_APPROVAL',
+  }).select('_id requestTypeId departmentId currentSequence').lean();
+  if (!requests.length) return;
+
+  const activeSteps = await ApprovalStep.find({
+    organizationId,
+    requestId: { $in: requests.map((request) => request._id) },
+    status: 'ACTIVE',
+  }).lean();
+  const stepsByRequest = new Map(activeSteps.map((step) => [String(step.requestId), step]));
+
+  for (const request of requests) {
+    const step = stepsByRequest.get(String(request._id));
+    if (!step || step.sequence !== request.currentSequence || step.approverType !== 'ROLE' || step.claimedBy) continue;
+
+    const workflow = await WorkflowDefinition.findOne({
+      _id: step.workflowDefinitionId,
+      organizationId,
+      version: step.workflowVersion,
+    }).select('stages').lean();
+    const stage = workflow?.stages.find((item) => item.stageId === step.stageId);
+    if (!stage || step.assignmentResolution !== 'CLAIM_ONE') continue;
+
+    const approvers = await resolveApprovers({
+      organizationId,
+      request,
+      stage: {
+        ...stage,
+        roleId: stage.roleId || step.roleId,
+        assignment: {
+          ...(stage.assignment || {}),
+          roleId: stage.assignment?.roleId || step.roleId,
+          resolution: step.assignmentResolution,
+        },
+      },
+    });
+    if (!approvers.some((approverId) => String(approverId) === String(actorId))) continue;
+    const existing = await ApprovalStep.exists({
+      organizationId,
+      requestId: request._id,
+      attemptNumber: step.attemptNumber,
+      sequence: step.sequence,
+      approverId: actorId,
+    });
+    if (existing) continue;
+
+    try {
+      await ApprovalStep.create({
+        organizationId,
+        requestId: request._id,
+        attemptNumber: step.attemptNumber,
+        workflowDefinitionId: step.workflowDefinitionId,
+        workflowVersion: step.workflowVersion,
+        stageId: step.stageId,
+        sequence: step.sequence,
+        stageName: step.stageName,
+        approverType: step.approverType,
+        approverId: actorId,
+        roleId: step.roleId,
+        assignmentResolution: step.assignmentResolution,
+        approvalMode: step.approvalMode,
+        status: 'ACTIVE',
+        slaStartedAt: step.slaStartedAt,
+        slaDueAt: step.slaDueAt,
+        nextReminderAt: step.nextReminderAt,
+      });
+    } catch (error) {
+      if (error?.code !== 11000) throw error;
+    }
+  }
 };
 
 export const listApprovalInbox = async ({ organizationId, actorId, access, query }) => {
@@ -504,6 +718,7 @@ export const listApprovalInbox = async ({ organizationId, actorId, access, query
       !(access.scopedPermissions.get('requests.approve')?.size || 0)) {
     throw new AppError('Permission requests.approve is required for this operation.', 403, 'FORBIDDEN');
   }
+  await reconcileCurrentRoleApproverStep({ organizationId, actorId });
   const delegators = await User.find({
     accountStatus: 'ACTIVE',
     organizationMemberships: { $elemMatch: { organizationId, status: 'ACTIVE' } },
@@ -535,7 +750,7 @@ export const listApprovalInbox = async ({ organizationId, actorId, access, query
   }
   const sort = { [query.sortBy]: query.sortOrder === 'asc' ? 1 : -1, _id: 1 };
   const candidates = await ApprovalStep.find(filter).sort(sort).lean();
-  const enriched = await enrichApprovalSteps(candidates);
+  const enriched = await enrichApprovalSteps(organizationId, candidates);
   const activeRequestIds = [...new Set(enriched
     .filter((step) => ['ACTIVE', 'CLAIMED'].includes(step.status) && step.request?.status === 'PENDING_APPROVAL')
     .map((step) => step.requestId))];
@@ -616,9 +831,12 @@ export const getApprovalDetails = async ({ organizationId, actorId, access, appr
     organizationId,
     version: step.workflowVersion,
   }).select('name version stages').lean();
+  const approverRole = step.roleId
+    ? await Role.findOne({ _id: step.roleId, organizationId }).select('name').lean()
+    : null;
   const historySteps = await ApprovalStep.find({ organizationId, requestId: step.requestId })
     .sort({ attemptNumber: 1, sequence: 1, createdAt: 1 })
-    .select('attemptNumber stageId stageName sequence status approverId assignmentResolution claimedBy claimedAt decidedBy decisionAt comments returnedBy returnedAt')
+    .select('requestId attemptNumber stageId stageName sequence status approverType roleId approverId assignmentResolution claimedBy claimedAt decidedBy decisionAt comments returnedBy returnedAt')
     .lean();
   const history = [];
   const claimOneStages = new Map();
@@ -643,5 +861,10 @@ export const getApprovalDetails = async ({ organizationId, actorId, access, appr
     left.sequence - right.sequence ||
     String(left.stageId).localeCompare(String(right.stageId))
   );
-  return { approval: step, request, workflow, history };
+  return {
+    approval: { ...step, approverRoleName: approverRole?.name || null },
+    request,
+    workflow,
+    history,
+  };
 };

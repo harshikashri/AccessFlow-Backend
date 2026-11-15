@@ -45,6 +45,7 @@ describe('Auth login', () => {
       platformRole: 'SUPER_ADMIN',
       organizationId: null,
     });
+    expect(response.body.data.user.authorization).toBeUndefined();
     expect(response.body.data.user.passwordHash).toBeUndefined();
     expect(response.body.data.refreshToken).toBeUndefined();
 

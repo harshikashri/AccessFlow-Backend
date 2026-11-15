@@ -200,7 +200,7 @@ export const validateCreateRequest = (body) => {
   const unknown = Object.keys(body).filter((key) => !allowed.includes(key));
   if (unknown.length) fail('Unsupported request fields.', unknown);
   return {
-    departmentId: validateId(body.departmentId, 'departmentId'),
+    ...(body.departmentId === undefined ? {} : { departmentId: validateId(body.departmentId, 'departmentId') }),
     requestTypeId: validateId(body.requestTypeId, 'requestTypeId'),
     title: stringValue(body.title, 'title', 3, REQUEST_TITLE_MAX),
     description: body.description === undefined ? '' : stringValue(body.description, 'description', 0, REQUEST_DESCRIPTION_MAX),

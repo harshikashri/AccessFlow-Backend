@@ -48,6 +48,9 @@ const assertRoleScopeType = (role, scopeType) => {
   if (roleType === 'DEPARTMENT_MANAGER' && scopeType !== 'DEPARTMENT') {
     throw new AppError('Department Manager roles must be assigned at department scope.', 400, 'INVALID_ROLE_SCOPE');
   }
+  if (role.rolePurpose === 'FINANCE_APPROVER' && scopeType !== 'DEPARTMENT') {
+    throw new AppError('Finance Approver roles must be assigned at department scope.', 400, 'INVALID_ROLE_SCOPE');
+  }
 };
 
 const getActiveRoleAssignments = async ({ userId, organizationId, session }) => {

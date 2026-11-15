@@ -2,6 +2,7 @@ import { AppError } from '../../utils/AppError.js';
 import * as roleService from './role.service.js';
 import {
 	validateAssignmentScope,
+	validateRoleAssignmentId,
 	validateCreateRole,
 	validatePaginationQuery,
 	validatePermissionUpdate,
@@ -113,6 +114,19 @@ export const removeRoleAssignment = async (req, res) => {
 	return res.status(200).json({ success: true, message: 'Role assignment removed successfully.', data: result });
 };
 
+export const updateRoleAssignment = async (req, res) => {
+	const assignmentId = validateRoleAssignmentId(req.params.assignmentId);
+	const scope = validateAssignmentScope(req.body);
+	const assignment = await roleService.updateRoleAssignment({
+		assignmentId,
+		organizationId: req.auth.organizationId,
+		actorId: req.auth.userId,
+		access: req.roleAccess,
+		scope,
+	});
+	return res.status(200).json({ success: true, message: 'Role assignment scope updated successfully.', data: assignment });
+};
+
 export const listUserRoleAssignments = async (req, res) => {
 	const userId = validateRoleId(req.params.userId, 'userId');
 	const query = validatePaginationQuery(req.query);
@@ -146,6 +160,7 @@ export default {
 	deactivateRole,
 	assignRole,
 	removeRoleAssignment,
+	updateRoleAssignment,
 	listUserRoleAssignments,
 	listRoleUsers,
 };

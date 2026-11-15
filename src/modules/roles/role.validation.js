@@ -25,6 +25,8 @@ export const validateRoleId = (value, fieldName = 'roleId') => {
 	return new mongoose.Types.ObjectId(value).toString();
 };
 
+export const validateRoleAssignmentId = (value) => validateRoleId(value, 'assignmentId');
+
 const validateName = (value) => {
 	if (typeof value !== 'string') fail('Role name is required.');
 	const name = value.trim();
@@ -165,6 +167,7 @@ export const validatePaginationQuery = (query) => {
 
 export default {
 	validateRoleId,
+	validateRoleAssignmentId,
 	validatePermissions,
 	validateCreateRole,
 	validateUpdateRole,

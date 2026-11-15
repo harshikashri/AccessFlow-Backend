@@ -28,6 +28,11 @@ router.get(
 	requireRoleManagementPermission('roles.view'),
 	asyncHandler(roleController.listRoleUsers)
 );
+router.patch(
+	'/assignments/:assignmentId',
+	requireRoleManagementPermission('roles.edit'),
+	asyncHandler(roleController.updateRoleAssignment)
+);
 router.get('/:roleId', requireRoleManagementPermission('roles.view'), asyncHandler(roleController.getRole));
 router.patch('/:roleId', requireRoleManagementPermission('roles.edit'), asyncHandler(roleController.updateRole));
 router.patch(

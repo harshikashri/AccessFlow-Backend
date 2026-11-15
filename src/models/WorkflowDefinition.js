@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { CONDITIONAL_OPERATORS, REQUEST_DEFINITION_TYPES, REQUEST_FIELD_TYPES, REQUEST_TYPES } from '../config/constants.js';
+import { REQUEST_DEFINITION_TYPES, REQUEST_FIELD_TYPES, REQUEST_TYPES } from '../config/constants.js';
 
 const requestTypeFieldSchema = new mongoose.Schema(
   {
@@ -15,26 +15,6 @@ const requestTypeFieldSchema = new mongoose.Schema(
     options: { type: [String], default: undefined },
     validation: { type: mongoose.Schema.Types.Mixed, default: {} },
     displayOrder: { type: Number, min: 0, default: 0 },
-  },
-  { _id: false }
-);
-
-const workflowStageConditionSchema = new mongoose.Schema(
-  {
-    field: {
-      type: String,
-      required: true,
-      trim: true,
-    },
-    operator: {
-      type: String,
-      enum: CONDITIONAL_OPERATORS,
-      required: true,
-    },
-    value: {
-      type: mongoose.Schema.Types.Mixed,
-      required: true,
-    },
   },
   { _id: false }
 );
@@ -91,7 +71,7 @@ const workflowStageSchema = new mongoose.Schema(
       default: null,
     },
     condition: {
-      type: workflowStageConditionSchema,
+      type: mongoose.Schema.Types.Mixed,
       default: null,
     },
     sla: {
@@ -177,6 +157,16 @@ const workflowDefinitionSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    selectionCondition: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    priority: {
+      type: Number,
+      min: 0,
+      max: 1000,
+      default: 0,
+    },
     version: {
       type: Number,
       required: true,
@@ -207,14 +197,26 @@ const workflowDefinitionSchema = new mongoose.Schema(
 
 workflowDefinitionSchema.index({ organizationId: 1, requestType: 1, isActive: 1 });
 workflowDefinitionSchema.index({ organizationId: 1, name: 1, version: 1 }, { unique: true });
+workflowDefinitionSchema.index({ organizationId: 1, requestTypeId: 1, version: 1 });
 workflowDefinitionSchema.index(
-  { organizationId: 1, requestTypeId: 1, version: 1 },
-  { unique: true, partialFilterExpression: { definitionType: 'APPROVAL_WORKFLOW', requestTypeId: { $type: 'objectId' } } }
+  { organizationId: 1, requestTypeId: 1, priority: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      definitionType: 'APPROVAL_WORKFLOW',
+      requestTypeId: { $type: 'objectId' },
+      isDefault: false,
+      isActive: true,
+    },
+  }
 );
-workflowDefinitionSchema.index(
-  { organizationId: 1, requestTypeId: 1 },
-  { unique: true, partialFilterExpression: { definitionType: 'APPROVAL_WORKFLOW', requestTypeId: { $type: 'objectId' }, isActive: true } }
-);
+workflowDefinitionSchema.index({
+  organizationId: 1,
+  definitionType: 1,
+  requestTypeId: 1,
+  isActive: 1,
+  priority: -1,
+});
 workflowDefinitionSchema.index(
   { organizationId: 1, isDefault: 1 },
   { unique: true, partialFilterExpression: { definitionType: 'APPROVAL_WORKFLOW', isDefault: true, isActive: true } }

@@ -13,7 +13,11 @@ import { withTransaction } from '../../utils/transaction.js';
 import { REQUEST_ACTIONS, REQUEST_TYPE_ACTIONS } from './request.constants.js';
 import { escapeRegex, normalizeCode, toPublicRequest, toPublicRequestType } from './request.utils.js';
 import { evaluateFields } from './request.conditions.js';
-import { cancelPendingApprovals, createRuntimeApprovals } from './approvalRuntime.service.js';
+import {
+  cancelPendingApprovals,
+  createRuntimeApprovals,
+  reconcileCurrentRoleApproverStep,
+} from './approvalRuntime.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, resourceType, resourceId, changes = {} }) => {
   await AuditLog.create([{
@@ -179,6 +183,7 @@ const mapDuplicateError = (error) => {
 };
 
 export const resolveRequestVisibility = async ({ organizationId, actorId, access }) => {
+  await reconcileCurrentRoleApproverStep({ organizationId, actorId });
   const isOrganizationAdmin = access.assignments.some(
     (assignment) => assignment.roleId?.roleType === 'ORGANIZATION_ADMIN'
   );
@@ -286,7 +291,9 @@ export const resolveRequestVisibility = async ({ organizationId, actorId, access
 
 export const getRequestVisibilityFilter = ({ actorId, requestVisibility }) => {
   const scopes = [{ requesterId: new mongoose.Types.ObjectId(String(actorId)) }];
-  if (requestVisibility.canViewOrganization) scopes.push({});
+  if (requestVisibility.canViewOrganization) {
+    scopes.push({ status: { $ne: 'DRAFT' } });
+  }
   if (!requestVisibility.isPersonalHistoryOnly &&
       requestVisibility.customRequestViewDepartmentIds.size) {
     scopes.push({
@@ -598,13 +605,21 @@ export const setRequestTypeStatus = async ({ organizationId, actorId, requestTyp
   });
 
 export const createRequest = async ({ organizationId, actorId, access, input }) => {
-  assertPermissionForDepartment(access, 'requests.create', input.departmentId);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       return await withTransaction(async (session) => {
         await assertActiveOrganization(organizationId, session);
-        await getActiveRequester({ userId: actorId, organizationId, session });
-        await getDepartmentForRequester({ departmentId: input.departmentId, organizationId, userId: actorId, session });
+        const requester = await getActiveRequester({ userId: actorId, organizationId, session });
+        const departmentId =
+          input.departmentId ||
+          requester.organizationMemberships.find(
+            (membership) => String(membership.organizationId) === String(organizationId) && membership.status === 'ACTIVE',
+          )?.departmentId;
+        if (!departmentId) {
+          throw new AppError('An active department membership is required to create a request.', 403, 'DEPARTMENT_MEMBERSHIP_REQUIRED');
+        }
+        assertPermissionForDepartment(access, 'requests.create', departmentId);
+        await getDepartmentForRequester({ departmentId, organizationId, userId: actorId, session });
         const definition = await getRequestType({ requestTypeId: input.requestTypeId, organizationId, session, activeOnly: true });
         validateDetails(input.details, definition);
         const amountField = getAmountField(definition);
@@ -612,7 +627,7 @@ export const createRequest = async ({ organizationId, actorId, access, input }) 
           organizationId,
           requestNumber: generateRequestNumber(),
           requesterId: actorId,
-          departmentId: input.departmentId,
+          departmentId,
           requestTypeId: definition._id,
           requestType: definition.code,
           requestTypeCode: definition.code,

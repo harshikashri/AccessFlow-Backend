@@ -170,7 +170,21 @@ Sets HttpOnly `refreshToken` cookie. Super Admin sessions use `organizationId: n
 ### `GET /api/auth/me`
 
 - Requires `Authorization: Bearer <accessToken>`
-- Returns safe user profile + active organization context
+- Returns the safe user profile, active organization context, and current effective permissions
+
+The existing profile fields are unchanged. `data.user.authorization` contains:
+
+```json
+{
+  "platformPermissions": [],
+  "organizationPermissions": ["requests.view"],
+  "departmentPermissions": {
+    "DEPARTMENT_OBJECT_ID": ["requests.approve", "users.view"]
+  }
+}
+```
+
+Organization and department permissions are resolved from active assignments and roles on each `/me` request. Department permission arrays are keyed by department ID. Super Admin continues to be identified by `data.user.platformRole`; this backend has no separate platform-permission catalog, so `platformPermissions` is empty and no tenant permissions are returned for platform sessions. A permission-resolution failure fails the `/me` request rather than returning an incomplete authorization object.
 
 ---
 
@@ -414,7 +428,11 @@ Common errors include `EMAIL_EXISTS` (`409`), `INVALID_ROLE_ASSIGNMENT` (`400`),
 
 Creating an organization provisions an active default approval workflow. Existing organizations can be synchronized with `npm run migrate:default-approval-workflows`; the migration processes every organization, creates only missing defaults, and preserves existing defaults and administrator changes.
 
-The default workflow requires Department Manager approval for every request as stage 1, using `CLAIM_ONE`. Eligible managers share one logical stage; after a manager claims it, the other candidate steps are non-actionable until an expired claim is released. Stage history displays the shared claim once. Stage 2 routes to the organization's Finance Approver role only when the request amount is strictly greater than 50,000. For Purchase Requests, the request amount is derived from the field marked with `semantic: "AMOUNT"` (the built-in field is `estimatedCost`). To safely mark the canonical Purchase Request field in existing organizations, first preview with `npm run migrate:purchase-request-amount-semantic -- --dry-run`, then run `npm run migrate:purchase-request-amount-semantic`; it only updates the required numeric `estimatedCost` field on a request type whose code is `PURCHASE`, and skips ambiguous or customized amount-field definitions. The migration does not alter existing requests. Organization Admins with `workflows.manage` can review and version-update the default through `GET /api/approval-workflows` and `PATCH /api/approval-workflows/:workflowId`; the default cannot be deactivated.
+An active request-type workflow is selected when its selection condition matches the request data; the matching workflow with the highest priority wins. If none matches, the active organization default is used. Active workflows for one request type must use distinct priorities. Workflow edits create a new definition version, while requests already submitted retain their stored workflow snapshot.
+
+The default workflow requires Department Manager approval for every request as stage 1, using `CLAIM_ONE`. Eligible managers share one logical stage; after a manager claims it, other candidate steps are non-actionable. Stage history displays the shared claim once. Stage 2 routes to the Finance Approver role only when the request amount is strictly greater than 50,000; Finance Approver assignments and eligibility are department-scoped, so all active approvers assigned in the request's department can see and compete to claim the step. For Purchase Requests, the request amount is derived from the field marked with `semantic: "AMOUNT"` (the built-in field is `estimatedCost`). To safely mark the canonical Purchase Request field in existing organizations, first preview with `npm run migrate:purchase-request-amount-semantic -- --dry-run`, then run `npm run migrate:purchase-request-amount-semantic`; it only updates the required numeric `estimatedCost` field on a request type whose code is `PURCHASE`, and skips ambiguous or customized amount-field definitions. The migration does not alter existing requests.
+
+Organization Admins with `workflows.manage` can create, review, validate, activate/deactivate, and version-update workflows through `/api/approval-workflows`. Conditions support nested AND/OR groups over request-type fields; the mandatory Department Manager stage must be first and cannot be conditional. The organization default is the fallback and cannot be deactivated.
 
 ---
 
@@ -433,6 +451,7 @@ Roles and user assignments are stored in the existing `roles` and `userRoleAssig
 | `PATCH` | `/api/roles/:roleId/activate` | Activate a role | `roles.edit` |
 | `PATCH` | `/api/roles/:roleId/deactivate` | Deactivate a role without deleting it | `roles.edit` |
 | `POST` | `/api/roles/:roleId/assign` | Assign a role to a user | `roles.edit` |
+| `PATCH` | `/api/roles/assignments/:assignmentId` | Atomically change one assignment's organization/department scope | `roles.edit` |
 | `DELETE` | `/api/roles/:roleId/assign/:userId` | Inactivate one scoped assignment | `roles.edit` |
 | `GET` | `/api/roles/users/:userId` | List a user's role assignments | `roles.view` |
 | `GET` | `/api/roles/:roleId/users` | List role assignments/users | `roles.view` |
@@ -484,11 +503,13 @@ Department assignment:
 
 Remove one assignment with `DELETE /api/roles/:roleId/assign/:userId`; send the matching scope in the JSON body. For example, `{ "scopeType": "ORGANIZATION" }` or `{ "scopeType": "DEPARTMENT", "departmentId": "DEPARTMENT_OBJECT_ID" }`. Removal marks only that assignment `INACTIVE`; it does not delete the user or membership.
 
+Change an existing assignment's scope with `PATCH /api/roles/assignments/:assignmentId` and send the new scope using the same scope shape. The operation validates the role, user, department, compatibility, and permission scope in one transaction; it never performs a remove-then-create sequence.
+
 Assignments require an active user and membership in the current organization. The role and, for department scope, department must be active and belong to that organization. Duplicate active assignments are rejected. Permission evaluation reloads active roles and assignments from MongoDB for each request; permissions are not embedded in JWTs. Role deactivation, permission edits, and assignment removal therefore affect existing access tokens immediately, while user login remains available when the account and membership are active.
 
-Roles use the optional `roleType` metadata on the existing Role document. Compatibility rules reject Employee plus Department Manager, and Employee plus Organization Admin, within one organization. Finance Approver and Report Viewer remain compatible. Department Manager and department-scoped custom roles must use the same department; organization-scoped roles may coexist. The same compatibility validator is used by role assignment and User creation. Existing Organization Admin role documents without `roleType` are recognized by the existing built-in role identifier.
+Roles use the optional `roleType` metadata and the `rolePurpose` field on the existing Role document. Roles with `rolePurpose: "FINANCE_APPROVER"` must be assigned at department scope, and Finance Approver workflow stages must also use the request department scope. Compatibility rules reject Employee plus Department Manager, and Employee plus Organization Admin, within one organization. Finance Approver and Report Viewer remain compatible. Department Manager and department-scoped custom roles must use the same department; organization-scoped roles may coexist. The same compatibility validator is used by role assignment and User creation. Existing Organization Admin role documents without `roleType` are recognized by the existing built-in role identifier.
 
-Deactivating a role preserves the role and assignments but removes its permissions from effective authorization. Reactivation restores permissions only through assignments that remain active. The last active Organization Admin able to manage roles cannot be deactivated, stripped of `roles.view/create/edit`, or unassigned. Role changes and assignment writes are transactional with append-only audit events: `ROLE_CREATED`, `ROLE_UPDATED`, `ROLE_PERMISSIONS_UPDATED`, `ROLE_ACTIVATED`, `ROLE_DEACTIVATED`, `ROLE_ASSIGNED`, and `ROLE_UNASSIGNED`.
+Deactivating a role preserves the role and assignments but removes its permissions from effective authorization. Reactivation restores permissions only through assignments that remain active. The last active Organization Admin able to manage roles cannot be deactivated, stripped of `roles.view/create/edit`, or unassigned. Role changes and assignment writes are transactional with append-only audit events: `ROLE_CREATED`, `ROLE_UPDATED`, `ROLE_PERMISSIONS_UPDATED`, `ROLE_ACTIVATED`, `ROLE_DEACTIVATED`, `ROLE_ASSIGNED`, `ROLE_ASSIGNMENT_SCOPE_UPDATED`, and `ROLE_UNASSIGNED`.
 
 Manual Postman sequence: log in as an Organization Admin; create a role with `POST /api/roles`; inspect available permission IDs with `GET /api/roles/permissions/catalog`; assign it using `POST /api/roles/:roleId/assign`; verify with `GET /api/roles/users/:userId`; update permissions or deactivate the role; reuse the assignee's existing access token to confirm permissions take effect immediately; then reactivate or remove the assignment. Role endpoints return `403` for non-Organization Admin actors and `404` for resources outside the caller's organization.
 

@@ -1,7 +1,9 @@
 import User from '../../models/User.js';
 import Session from '../../models/Session.js';
+import AuditLog from '../../models/AuditLog.js';
 import Organization from '../../models/Organization.js';
 import { AppError } from '../../utils/AppError.js';
+import { resolveEffectivePermissions } from '../../services/authorization/permission.service.js';
 import { verifyPassword } from '../../utils/password.js';
 import {
   generateAccessToken,
@@ -16,6 +18,28 @@ import {
   toObjectIdOrNull,
   toPublicUser,
 } from './auth.utils.js';
+
+const serializeAuthorization = (access) => {
+  const departmentPermissions = {};
+  for (const [permission, departmentIds] of access?.scopedPermissions || []) {
+    for (const departmentId of departmentIds) {
+      if (!departmentPermissions[departmentId]) {
+        departmentPermissions[departmentId] = [];
+      }
+      departmentPermissions[departmentId].push(permission);
+    }
+  }
+
+  for (const permissions of Object.values(departmentPermissions)) {
+    permissions.sort();
+  }
+
+  return {
+    platformPermissions: [],
+    organizationPermissions: [...(access?.organizationPermissions || [])].sort(),
+    departmentPermissions,
+  };
+};
 
 const invalidCredentials = () =>
   new AppError('Invalid email or password.', 401, 'INVALID_CREDENTIALS');
@@ -171,6 +195,14 @@ export const login = async ({ email, password, organizationId }) => {
     revokedAt: null,
     lastUsedAt: new Date(),
   });
+  await AuditLog.create([{
+    organizationId: session.organizationId,
+    actorId: user._id,
+    action: 'LOGIN_SUCCEEDED',
+    resourceType: 'Session',
+    resourceId: session._id,
+    metadata: { sessionId: String(session._id) },
+  }]);
 
   return buildAuthResult(user, session, refreshToken);
 };
@@ -250,6 +282,7 @@ export const logout = async ({ userId, sessionId }) => {
     return { revoked: false };
   }
 
+  const existingSession = await Session.findOne({ _id: sessionId, userId, revokedAt: null }).select('organizationId');
   const result = await Session.updateOne(
     {
       _id: sessionId,
@@ -262,6 +295,15 @@ export const logout = async ({ userId, sessionId }) => {
       },
     }
   );
+  if (result.modifiedCount > 0) {
+    await AuditLog.create([{
+      organizationId: existingSession?.organizationId || null,
+      actorId: userId,
+      action: 'LOGOUT',
+      resourceType: 'Session',
+      resourceId: sessionId,
+    }]);
+  }
 
   return { revoked: result.modifiedCount > 0 };
 };
@@ -278,6 +320,17 @@ export const logoutAll = async (userId) => {
       },
     }
   );
+  if (result.modifiedCount > 0) {
+    const user = await User.findById(userId).select('organizationMemberships');
+    await AuditLog.create([{
+      organizationId: user?.organizationMemberships?.find((membership) => membership.status === 'ACTIVE')?.organizationId || null,
+      actorId: userId,
+      action: 'LOGOUT_ALL',
+      resourceType: 'User',
+      resourceId: userId,
+      changes: { revokedCount: result.modifiedCount },
+    }]);
+  }
 
   return { revokedCount: result.modifiedCount };
 };
@@ -299,8 +352,18 @@ export const getCurrentUser = async ({ userId, sessionId }) => {
 
   await assertOrganizationContextForUser(user, session.organizationId);
 
+  const access = session.organizationId
+    ? await resolveEffectivePermissions({
+      userId: user._id,
+      organizationId: session.organizationId,
+    })
+    : null;
+
   return {
-    user: toPublicUser(user, session.organizationId),
+    user: {
+      ...toPublicUser(user, session.organizationId),
+      authorization: serializeAuthorization(access),
+    },
   };
 };
 

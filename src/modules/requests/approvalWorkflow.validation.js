@@ -25,8 +25,26 @@ const validateDuration = (value, label, key = 'duration') => {
   return { [key]: value[key], unit: value.unit || 'HOURS' };
 };
 
+const isEmptyStageSla = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const escalation = value.escalation && typeof value.escalation === 'object'
+    ? value.escalation
+    : {};
+  const claimExpiry = value.claimExpiry && typeof value.claimExpiry === 'object'
+    ? value.claimExpiry
+    : {};
+  return (value.duration === undefined || value.duration === null) &&
+    (!Array.isArray(value.reminders) || value.reminders.length === 0) &&
+    escalation.enabled !== true &&
+    (escalation.after === undefined || escalation.after === null) &&
+    (!Array.isArray(escalation.levels) || escalation.levels.length === 0) &&
+    !escalation.targetType &&
+    !escalation.targetId &&
+    (claimExpiry.duration === undefined || claimExpiry.duration === null);
+};
+
 const validateStageTiming = (stage) => {
-  const sla = validateDuration(stage.sla, 'Stage SLA');
+  const sla = validateDuration(isEmptyStageSla(stage.sla) ? null : stage.sla, 'Stage SLA');
   if (!sla) return { sla: null };
   const reminders = (stage.sla.reminders || []).map((reminder) => {
     const normalized = validateDuration(reminder, 'Reminder schedule', 'after');
@@ -89,10 +107,14 @@ const validateAssignment = (stage) => {
   const assignment = stage.assignment || {};
   const type = stage.approverType || assignment.type;
   const resolution = assignment.resolution || (type === 'USER' ? 'DIRECT' : 'CLAIM_ONE');
+  const scopeType = assignment.scopeType ?? (type === 'ROLE' ? 'DEPARTMENT' : null);
   if (!['DEPARTMENT_MANAGER', 'ROLE', 'USER', 'ORGANIZATION_ADMIN'].includes(type)) {
     fail('Invalid approval stage assignment type.');
   }
   if (!['DIRECT', 'CLAIM_ONE'].includes(resolution)) fail('Invalid approval stage resolution.');
+  if (scopeType !== null && !['DEPARTMENT', 'ORGANIZATION', 'ORGANIZATION_OR_DEPARTMENT'].includes(scopeType)) {
+    fail('Invalid role approval scope.');
+  }
   if (resolution === 'CLAIM_ONE' && stage.approvalMode === 'ALL') {
     fail('CLAIM_ONE cannot be combined with ALL approval mode.');
   }
@@ -101,6 +123,7 @@ const validateAssignment = (stage) => {
   return {
     type,
     resolution,
+    ...(scopeType ? { scopeType } : {}),
     roleId: type === 'ROLE' ? id(assignment.roleId, 'roleId') : null,
     userId: type === 'USER' ? id(assignment.userId, 'userId') : null,
   };
@@ -108,10 +131,30 @@ const validateAssignment = (stage) => {
 
 export const validateApprovalWorkflow = (body) => {
   if (!body || typeof body !== 'object' || Array.isArray(body)) fail('Workflow body must be an object.');
-  const allowed = ['name', 'description', 'requestTypeId', 'stages'];
+  const allowed = [
+    'name',
+    'description',
+    'requestTypeId',
+    'isDefault',
+    'selectionCondition',
+    'priority',
+    'stages',
+  ];
   const unknown = Object.keys(body).filter((key) => !allowed.includes(key));
   if (unknown.length) fail('Unsupported workflow fields.', unknown);
   if (!Array.isArray(body.stages) || body.stages.length === 0) fail('At least one workflow stage is required.');
+  if (body.isDefault !== undefined && typeof body.isDefault !== 'boolean') {
+    fail('Workflow isDefault must be boolean.');
+  }
+  if (body.selectionCondition !== undefined &&
+      body.selectionCondition !== null &&
+      (!body.selectionCondition || typeof body.selectionCondition !== 'object' || Array.isArray(body.selectionCondition))) {
+    fail('Workflow selection condition must be an object.');
+  }
+  if (body.priority !== undefined &&
+      (!Number.isInteger(body.priority) || body.priority < 0 || body.priority > 1000)) {
+    fail('Workflow priority must be a whole number between 0 and 1000.');
+  }
 
   const seenIds = new Set();
   const seenOrders = new Set();
@@ -154,18 +197,33 @@ export const validateApprovalWorkflow = (body) => {
     };
   });
 
-  const managerStages = stages.filter((stage) => stage.approverType === 'DEPARTMENT_MANAGER' && stage.isMandatory);
-  if (managerStages.length !== 1) fail('Exactly one mandatory Department Manager stage is required.');
+  const managerStages = stages.filter((stage) => stage.approverType === 'DEPARTMENT_MANAGER');
+  if (managerStages.length !== 1 || !managerStages[0].isMandatory) {
+    fail('Exactly one mandatory Department Manager stage is required.');
+  }
+  if (managerStages[0].sequence !== 1) {
+    fail('The mandatory Department Manager stage must be first.');
+  }
   if (managerStages[0].assignment.resolution !== 'CLAIM_ONE' || managerStages[0].approvalMode !== 'ANY') {
     fail('The mandatory Department Manager stage must use CLAIM_ONE and ANY.');
   }
 
+  const requestTypeId = body.requestTypeId === undefined || body.requestTypeId === null
+    ? null
+    : id(body.requestTypeId, 'requestTypeId');
+  const isDefault = body.isDefault === true ||
+    (body.isDefault === undefined && requestTypeId === null);
+  if (isDefault && requestTypeId) fail('The organization default workflow cannot target a request type.');
+  if (isDefault && body.selectionCondition) fail('The organization default workflow cannot have a selection condition.');
+  if (!isDefault && !requestTypeId) fail('A request type is required for a conditional workflow.');
+
   return {
     name: text(body.name, 'Workflow name', 200),
     description: body.description === undefined ? '' : (body.description === '' ? '' : text(body.description, 'Workflow description', 1000)),
-    requestTypeId: body.requestTypeId === undefined || body.requestTypeId === null
-      ? null
-      : id(body.requestTypeId, 'requestTypeId'),
+    requestTypeId,
+    isDefault,
+    ...(body.selectionCondition === undefined ? {} : { selectionCondition: body.selectionCondition }),
+    ...(body.priority === undefined ? {} : { priority: body.priority }),
     stages: stages.sort((left, right) => left.sequence - right.sequence),
   };
 };
