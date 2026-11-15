@@ -22,6 +22,8 @@ import Department from '../../src/models/Department.js';
 import Role from '../../src/models/Role.js';
 import UserRoleAssignment from '../../src/models/UserRoleAssignment.js';
 import AuditLog from '../../src/models/AuditLog.js';
+import ApprovalStep from '../../src/models/ApprovalStep.js';
+import * as userServiceModule from '../../src/modules/users/user.service.js';
 import {
   DEPARTMENT_MANAGER_PERMISSIONS,
   DEPARTMENT_MANAGER_ROLE_NAME,
@@ -127,6 +129,7 @@ describe('User management', () => {
     const employeeRole = await Role.create({
       organizationId,
       name: 'Employee',
+      assignmentScope: 'DEPARTMENT',
       permissions: ['users.view'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -429,6 +432,7 @@ describe('User management', () => {
     const restrictedRole = await Role.create({
       organizationId,
       name: 'Restricted Creator',
+      assignmentScope: 'ORGANIZATION',
       permissions: ['users.create'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -447,6 +451,7 @@ describe('User management', () => {
     const privilegedRole = await Role.create({
       organizationId,
       name: 'Privileged User Admin',
+      assignmentScope: 'ORGANIZATION',
       permissions: ['users.deactivate', 'users.edit'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -470,6 +475,7 @@ describe('User management', () => {
       organizationId,
       name: 'User Creator',
       roleType: 'CUSTOM',
+      assignmentScope: 'ORGANIZATION',
       permissions: ['users.create'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -597,6 +603,7 @@ describe('User management', () => {
     const scopedRole = await Role.create({
       organizationId,
       name: 'Department User Viewer',
+      assignmentScope: 'DEPARTMENT',
       permissions: ['users.view'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -723,6 +730,7 @@ describe('User management', () => {
     const operatorRole = await Role.create({
       organizationId,
       name: 'User Deactivation Operator',
+      assignmentScope: 'ORGANIZATION',
       permissions: ['users.deactivate'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -748,6 +756,707 @@ describe('User management', () => {
       .set(authHeader(token));
     expect(selfDeactivate.status).toBe(403);
     expect(selfDeactivate.body.code).toBe('SELF_DEACTIVATION_FORBIDDEN');
+  });
+
+  it('reactivates a pending-setup membership without activating the global account', async () => {
+    const { organizationId, token } = await createOrganizationContext('pending-reactivation');
+    const target = await createActiveUser({
+      organizationId,
+      email: 'pending-reactivation@example.com',
+    });
+    await User.updateOne(
+      { _id: target._id },
+      {
+        $set: {
+          accountStatus: 'INACTIVE',
+          passwordSetupRequired: true,
+          'organizationMemberships.0.status': 'INACTIVE',
+        },
+      }
+    );
+
+    const response = await request(app)
+      .patch(`/api/users/${target._id}/activate`)
+      .set(authHeader(token));
+
+    expect(response.status).toBe(200);
+    const updated = await User.findById(target._id);
+    expect(updated.accountStatus).toBe('INACTIVE');
+    expect(updated.passwordSetupRequired).toBe(true);
+    expect(updated.organizationMemberships[0].status).toBe('ACTIVE');
+  });
+
+  it('previews and imports multiple built-in role assignments for one user without duplicate users', async () => {
+    const { organizationId, token } = await createOrganizationContext('bulk-import');
+    const department = await Department.create({ organizationId, name: 'Bulk Engineering' });
+    const csv = [
+      'firstName,lastName,email,employeeId,department,role,designation,phone',
+      'Bulk,User,bulk-user@example.com,,Bulk Engineering,Department Manager,,',
+      'Bulk,User,bulk-user@example.com,,,Organization Admin,,',
+    ].join('\r\n');
+
+    const template = await request(app)
+      .get('/api/users/bulk-import/template')
+      .set(authHeader(token));
+    expect(template.status).toBe(200);
+    expect(template.headers['content-type']).toContain('text/csv');
+    expect(template.text.startsWith('firstName,lastName,email,employeeId,department,role,designation,phone,scope\r\n')).toBe(true);
+    expect(template.text).toContain('Repeat email for multiple roles');
+
+    const preview = await request(app)
+      .post('/api/users/bulk-import/validate')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'bulk-users.csv', contentType: 'text/csv' });
+    expect(preview.status).toBe(200);
+    expect(preview.body.data.summary).toMatchObject({
+      totalRows: 2,
+      validUsers: 1,
+      validAssignments: 2,
+      invalidRows: 0,
+    });
+    expect(preview.body.data.rows.every((row) => row.status === 'VALID')).toBe(true);
+    expect(await User.countDocuments({ email: 'bulk-user@example.com' })).toBe(0);
+
+    const imported = await request(app)
+      .post('/api/users/bulk-import/confirm')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'bulk-users.csv', contentType: 'text/csv' });
+    expect(imported.status).toBe(200);
+    expect(imported.body.data.summary).toMatchObject({
+      usersCreated: 1,
+      assignmentsCreated: 2,
+      existingUsersSkipped: 0,
+      failedAssignments: 0,
+      invitations: { sent: 1, failed: 0 },
+    });
+    expect(imported.body.data.errorReport).toMatchObject({
+      contentType: 'text/csv',
+      filename: expect.stringMatching(/errors\.csv$/),
+    });
+    const created = await User.findOne({ email: 'bulk-user@example.com' });
+    expect(created.name).toBe('Bulk User');
+    expect(await UserRoleAssignment.countDocuments({
+      userId: created._id,
+      organizationId,
+      status: 'ACTIVE',
+    })).toBe(2);
+    expect(sendWithResendMock).toHaveBeenCalledOnce();
+
+    const retry = await request(app)
+      .post('/api/users/bulk-import/confirm')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'bulk-users.csv', contentType: 'text/csv' });
+    expect(retry.status).toBe(200);
+    expect(retry.body.data.summary).toMatchObject({
+      usersCreated: 0,
+      assignmentsCreated: 0,
+      existingUsersSkipped: 1,
+      invitations: { sent: 0, failed: 0 },
+    });
+    expect(await User.countDocuments({ email: 'bulk-user@example.com' })).toBe(1);
+    expect(sendWithResendMock).toHaveBeenCalledOnce();
+  });
+
+  it('returns a safe CSV report for invalid roles and rejects cross-organization references', async () => {
+    const { organizationId, token } = await createOrganizationContext('bulk-invalid');
+    const otherOrganizationId = new mongoose.Types.ObjectId();
+    const platformAdmin = await createSuperAdmin({ email: 'bulk-report-platform@example.com' });
+    await Organization.create({
+      _id: otherOrganizationId,
+      name: 'Other Bulk Organization',
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    });
+    await Department.create({ organizationId: otherOrganizationId, name: 'Secret Department' });
+    await Department.create({ organizationId, name: 'Inactive Bulk Department', status: 'INACTIVE' });
+    await Role.create({
+      organizationId,
+      name: 'Custom Auditor',
+      roleType: 'CUSTOM',
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    });
+    await Role.create({
+      organizationId,
+      name: 'Inactive Bulk Role',
+      roleType: 'CUSTOM',
+      assignmentScope: 'ORGANIZATION',
+      permissions: ['users.view'],
+      status: 'INACTIVE',
+      createdBy: platformAdmin._id,
+    });
+    await Role.create({
+      organizationId: otherOrganizationId,
+      name: 'Foreign Bulk Role',
+      roleType: 'CUSTOM',
+      assignmentScope: 'ORGANIZATION',
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    });
+    await Role.create([
+      {
+        organizationId,
+        name: 'Ambiguous Bulk Role',
+        roleType: 'CUSTOM',
+        assignmentScope: 'ORGANIZATION',
+        permissions: ['users.view'],
+        status: 'ACTIVE',
+        createdBy: platformAdmin._id,
+      },
+      {
+        organizationId,
+        name: 'ambiguous bulk role',
+        roleType: 'CUSTOM',
+        assignmentScope: 'ORGANIZATION',
+        permissions: ['users.view'],
+        status: 'ACTIVE',
+        createdBy: platformAdmin._id,
+      },
+    ]);
+    const csv = [
+      'firstName,lastName,email,employeeId,department,role,designation,phone',
+      'Bad,Department,bad-department@example.com,,Secret Department,Department Manager,,',
+      'Bad,Role,bad-role@example.com,,,Missing Role,,',
+      'Custom,Role,custom-role@example.com,,,Custom Auditor,,',
+      'Inactive,Department,inactive-department@example.com,,Inactive Bulk Department,Department Manager,,',
+      'Inactive,Role,inactive-role@example.com,,,Inactive Bulk Role,,',
+      'Foreign,Role,foreign-role@example.com,,,Foreign Bulk Role,,',
+      'Ambiguous,Role,ambiguous-role@example.com,,,Ambiguous Bulk Role,,',
+    ].join('\n');
+
+    const preview = await request(app)
+      .post('/api/users/bulk-import/validate')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'invalid-users.csv', contentType: 'text/csv' });
+    expect(preview.status).toBe(200);
+    expect(preview.body.data.rows[0].status).toBe('INVALID');
+    expect(preview.body.data.rows[0].errors.join(' ')).toContain('Department is not found or available');
+    expect(preview.body.data.rows[0].errors.join(' ')).not.toContain(String(otherOrganizationId));
+    expect(preview.body.data.rows[1].errors.join(' ')).toContain('Role is not found or available');
+    expect(preview.body.data.rows[2].errors.join(' ')).toContain('no configured assignment scope');
+    expect(preview.body.data.rows[3].errors.join(' ')).toContain('Department is inactive');
+    expect(preview.body.data.rows[4].errors.join(' ')).toContain('Role is inactive');
+    expect(preview.body.data.rows[5].errors.join(' ')).toContain('Role is not found or available');
+    expect(preview.body.data.rows[5].errors.join(' ')).not.toContain('Foreign');
+    expect(preview.body.data.rows[6].errors.join(' ')).toContain('Role name is ambiguous');
+
+    const report = await request(app)
+      .post('/api/users/bulk-import/failed-report')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'invalid-users.csv', contentType: 'text/csv' });
+    expect(report.status).toBe(200);
+    expect(report.headers['content-type']).toContain('text/csv');
+    expect(report.text).toContain('bad-role@example.com');
+    expect(report.text).toContain('bad-department@example.com');
+    expect(report.text).toContain('custom-role@example.com');
+    expect(report.text).toContain('inactive-department@example.com');
+    expect(report.text).toContain('inactive-role@example.com');
+    expect(await User.countDocuments({ email: 'bad-role@example.com' })).toBe(0);
+    expect(await UserRoleAssignment.countDocuments({ organizationId: otherOrganizationId })).toBe(0);
+  });
+
+  it('imports configured custom organization and department roles and audits partial failures safely', async () => {
+    const { organizationId, token, admin } = await createOrganizationContext('bulk-custom-scopes');
+    const department = await Department.create({ organizationId, name: 'Bulk Scope Department' });
+    const createCustomRole = (name, assignmentScope) => request(app)
+      .post('/api/roles')
+      .set(authHeader(token))
+      .send({ name, assignmentScope, permissions: ['users.view'] });
+    const [organizationRole, departmentRole, dualScopeRole] = await Promise.all([
+      createCustomRole('Bulk Organization Role', 'ORGANIZATION'),
+      createCustomRole('Bulk Department Role', 'DEPARTMENT'),
+      request(app)
+        .post('/api/roles')
+        .set(authHeader(token))
+        .send({
+          name: 'Bulk Dual Scope Role',
+          assignmentScopes: ['ORGANIZATION', 'DEPARTMENT'],
+          permissions: ['users.view'],
+        }),
+    ]);
+    expect(organizationRole.status).toBe(201);
+    expect(departmentRole.status).toBe(201);
+    expect(organizationRole.body.data.assignmentScope).toBe('ORGANIZATION');
+    expect(departmentRole.body.data.assignmentScope).toBe('DEPARTMENT');
+    expect(dualScopeRole.body.data.assignmentScopes).toEqual(['ORGANIZATION', 'DEPARTMENT']);
+    await Role.create({
+      organizationId,
+      name: 'Legacy Bulk Role',
+      roleType: 'CUSTOM',
+      assignmentScope: null,
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    });
+
+    const csv = [
+      'firstName,lastName,email,employeeId,department,role,designation,phone,scope',
+      'Bulk,Scope,bulk-custom-scope@example.com,,,Bulk Organization Role,,,',
+      'Bulk,Scope,bulk-custom-scope@example.com,,Bulk Scope Department,Bulk Department Role,,,',
+      'Bulk,Scope,bulk-custom-scope@example.com,,,Bulk Dual Scope Role,,,ORGANIZATION',
+      'Bulk,Scope,bulk-custom-scope@example.com,,Bulk Scope Department,Bulk Dual Scope Role,,,DEPARTMENT',
+      'Legacy,Scope,bulk-legacy-scope@example.com,,,Legacy Bulk Role,,,',
+      'Ambiguous,Scope,bulk-dual-missing@example.com,,,Bulk Dual Scope Role,,,',
+    ].join('\n');
+    const response = await request(app)
+      .post('/api/users/bulk-import/confirm')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'custom-scopes.csv', contentType: 'text/csv' });
+    expect(response.status).toBe(200);
+    expect(response.body.data.summary).toMatchObject({
+      usersCreated: 1,
+      assignmentsCreated: 4,
+      invalidUsersSkipped: 2,
+      failedAssignments: 0,
+    });
+    expect(response.body.data.rows[0].status).toBe('IMPORTED');
+    expect(response.body.data.rows[1].status).toBe('IMPORTED');
+    expect(response.body.data.rows[2].status).toBe('IMPORTED');
+    expect(response.body.data.rows[3].status).toBe('IMPORTED');
+    expect(response.body.data.rows[4].errors.join(' ')).toContain('no configured assignment scope');
+    expect(response.body.data.rows[5].errors.join(' ')).toContain('specify ORGANIZATION or DEPARTMENT');
+    const importedUser = await User.findOne({ email: 'bulk-custom-scope@example.com' });
+    const assignments = await UserRoleAssignment.find({
+      userId: importedUser._id,
+      organizationId,
+      status: 'ACTIVE',
+    }).populate('roleId', 'name assignmentScope assignmentScopes');
+    expect(assignments).toHaveLength(4);
+    expect(assignments.map(({ roleId, scopeType, departmentId }) => ({
+      role: roleId.name,
+      assignmentScope: roleId.assignmentScope,
+      assignmentScopes: roleId.assignmentScopes,
+      scopeType,
+      departmentId: departmentId ? String(departmentId) : null,
+    }))).toEqual(expect.arrayContaining([
+      {
+        role: 'Bulk Organization Role',
+        assignmentScope: 'ORGANIZATION',
+        assignmentScopes: ['ORGANIZATION'],
+        scopeType: 'ORGANIZATION',
+        departmentId: null,
+      },
+      {
+        role: 'Bulk Department Role',
+        assignmentScope: 'DEPARTMENT',
+        assignmentScopes: ['DEPARTMENT'],
+        scopeType: 'DEPARTMENT',
+        departmentId: String(department._id),
+      },
+      {
+        role: 'Bulk Dual Scope Role',
+        assignmentScope: null,
+        assignmentScopes: ['ORGANIZATION', 'DEPARTMENT'],
+        scopeType: 'ORGANIZATION',
+        departmentId: null,
+      },
+      {
+        role: 'Bulk Dual Scope Role',
+        assignmentScope: null,
+        assignmentScopes: ['ORGANIZATION', 'DEPARTMENT'],
+        scopeType: 'DEPARTMENT',
+        departmentId: String(department._id),
+      },
+    ]));
+
+    const importId = response.body.data.importId;
+    const completedAudit = await AuditLog.findOne({
+      resourceType: 'BulkUserImport',
+      resourceId: importId,
+      action: 'BULK_USER_IMPORT_COMPLETED_WITH_FAILURES',
+    }).lean();
+    expect(completedAudit.metadata.correlationId).toBe(importId);
+    const auditText = JSON.stringify(await AuditLog.find({ resourceType: 'BulkUserImport' }).lean());
+    expect(auditText).not.toContain(csv);
+    expect(auditText).not.toContain('bulk-custom-scope@example.com');
+    expect(auditText).not.toContain('bulk-legacy-scope@example.com');
+    expect(auditText).not.toContain('"csv"');
+
+    const invalidCsv = 'not,the,bulk,user,template';
+    const failed = await request(app)
+      .post('/api/users/bulk-import/confirm')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(invalidCsv, 'utf8'), { filename: 'invalid.csv', contentType: 'text/csv' });
+    expect(failed.status).toBe(400);
+    expect(failed.body.code).toBe('BULK_IMPORT_CSV_INVALID');
+    const failedAudit = await AuditLog.findOne({
+      resourceType: 'BulkUserImport',
+      action: 'BULK_USER_IMPORT_FAILED',
+    }).sort({ timestamp: -1 }).lean();
+    expect(failedAudit.metadata.correlationId).toBe(String(failedAudit.resourceId));
+    expect(failedAudit.metadata.errorCode).toBe(failed.body.code);
+    expect(JSON.stringify(failedAudit)).not.toContain(invalidCsv);
+  });
+
+  it('counts assignment failures when creation of a valid multi-role user group fails', async () => {
+    const { organizationId, token, admin } = await createOrganizationContext('bulk-assignment-failure');
+    const department = await Department.create({ organizationId, name: 'Failed Assignment Department' });
+    await Role.create([
+      {
+        organizationId,
+        name: 'Failed Assignment Role One',
+        roleType: 'CUSTOM',
+        assignmentScope: 'DEPARTMENT',
+        permissions: ['users.view'],
+        status: 'ACTIVE',
+        createdBy: admin._id,
+      },
+      {
+        organizationId,
+        name: 'Failed Assignment Role Two',
+        roleType: 'CUSTOM',
+        assignmentScope: 'DEPARTMENT',
+        permissions: ['users.view'],
+        status: 'ACTIVE',
+        createdBy: admin._id,
+      },
+    ]);
+    const csv = [
+      'firstName,lastName,email,employeeId,department,role,designation,phone',
+      'Failed,Group,bulk-assignment-failure@example.com,,Failed Assignment Department,Failed Assignment Role One,,',
+      'Failed,Group,bulk-assignment-failure@example.com,,Failed Assignment Department,Failed Assignment Role Two,,',
+    ].join('\n');
+    const createUserSpy = vi.spyOn(userServiceModule, 'createUser')
+      .mockRejectedValueOnce(new Error('Internal test failure'));
+    try {
+      const response = await request(app)
+        .post('/api/users/bulk-import/confirm')
+        .set(authHeader(token))
+        .attach('file', Buffer.from(csv, 'utf8'), { filename: 'failed-group.csv', contentType: 'text/csv' });
+      expect(response.status).toBe(200);
+      expect(response.body.data.summary).toMatchObject({
+        usersCreated: 0,
+        assignmentsCreated: 0,
+        invalidUsersSkipped: 0,
+        failedUsers: 1,
+        failedAssignments: 2,
+      });
+      expect(response.body.data.rows).toHaveLength(2);
+      expect(response.body.data.rows.every((row) => row.status === 'FAILED')).toBe(true);
+      expect(response.body.data.errorReport.csv).toContain('Failed Assignment Role One');
+      expect(response.body.data.errorReport.csv).toContain('Failed Assignment Role Two');
+      expect(await User.exists({ email: 'bulk-assignment-failure@example.com' })).toBeNull();
+      expect(await UserRoleAssignment.countDocuments({
+        organizationId,
+        roleId: { $in: await Role.find({ organizationId, name: /Failed Assignment Role/ }).distinct('_id') },
+      })).toBe(0);
+    } finally {
+      createUserSpy.mockRestore();
+    }
+  });
+
+  it('distinguishes existing identities and rejects conflicting or duplicate email groups without writes', async () => {
+    const { organizationId, token } = await createOrganizationContext('bulk-identities');
+    const foreign = await createOrganizationContext('bulk-identities-foreign');
+    const department = await Department.create({ organizationId, name: 'Bulk Identity Department' });
+    const existing = await createActiveUser({
+      organizationId,
+      email: 'bulk-existing-same-org@example.com',
+    });
+    const foreignUser = await createActiveUser({
+      organizationId: foreign.organizationId,
+      email: 'bulk-existing-other-org@example.com',
+    });
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+    const csv = [
+      'firstName,lastName,email,employeeId,department,role,designation,phone',
+      'Same,Org,bulk-existing-same-org@example.com,,Bulk Identity Department,Department Member,,',
+      'Other,Org,bulk-existing-other-org@example.com,,Bulk Identity Department,Department Member,,',
+      'Conflict,Person,bulk-profile-conflict@example.com,,Bulk Identity Department,Department Member,,',
+      'Different,Person,bulk-profile-conflict@example.com,,Bulk Identity Department,Department Manager,,',
+      'Duplicate,Role,bulk-duplicate-role@example.com,,Bulk Identity Department,Department Member,,',
+      'Duplicate,Role,bulk-duplicate-role@example.com,,Bulk Identity Department,Department Member,,',
+    ].join('\n');
+    const preview = await request(app)
+      .post('/api/users/bulk-import/validate')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'identities.csv', contentType: 'text/csv' });
+    expect(preview.status).toBe(200);
+    expect(preview.body.data.rows[0].status).toBe('EXISTING');
+    expect(preview.body.data.rows[1].status).toBe('INVALID');
+    expect(preview.body.data.rows[1].errors.join(' ')).toContain('already registered');
+    expect(preview.body.data.rows[1].errors.join(' ')).not.toContain(String(foreign.organizationId));
+    expect(preview.body.data.rows.slice(2, 4).every((row) =>
+      row.errors.some((error) => error.includes('conflicting firstName'))
+    )).toBe(true);
+    expect(preview.body.data.rows[4].status).toBe('INVALID');
+    expect(preview.body.data.rows[5].status).toBe('DUPLICATE');
+    expect(preview.body.data.summary.invalidRows).toBe(5);
+    expect(preview.body.data.summary.duplicateRows).toBe(1);
+    expect(await User.countDocuments({ email: 'bulk-existing-same-org@example.com' })).toBe(1);
+    expect(await User.countDocuments({ email: 'bulk-existing-other-org@example.com' })).toBe(1);
+    expect(await User.countDocuments({ email: { $in: [
+      'bulk-profile-conflict@example.com',
+      'bulk-duplicate-role@example.com',
+    ] } })).toBe(0);
+    expect(await UserRoleAssignment.countDocuments({ userId: existing._id, roleId: memberRole._id })).toBe(0);
+    expect(await User.exists({ _id: foreignUser._id })).toBeTruthy();
+  });
+
+  it('serializes concurrent confirmation of the same CSV without duplicate users, roles, or invitations', async () => {
+    const { organizationId, token } = await createOrganizationContext('bulk-confirm-race');
+    const department = await Department.create({ organizationId, name: 'Concurrent Bulk Department' });
+    const csv = [
+      'firstName,lastName,email,employeeId,department,role,designation,phone',
+      'Concurrent,User,bulk-confirm-race@example.com,,Concurrent Bulk Department,Department Member,,',
+    ].join('\n');
+    const confirm = () => request(app)
+      .post('/api/users/bulk-import/confirm')
+      .set(authHeader(token))
+      .attach('file', Buffer.from(csv, 'utf8'), { filename: 'concurrent.csv', contentType: 'text/csv' });
+
+    const responses = await Promise.all([confirm(), confirm()]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(responses.reduce((total, response) => total + response.body.data.summary.usersCreated, 0)).toBe(1);
+    expect(responses.reduce((total, response) => total + response.body.data.summary.assignmentsCreated, 0)).toBe(1);
+    expect(responses.reduce((total, response) => total + response.body.data.summary.existingUsersSkipped, 0)).toBe(1);
+    const user = await User.findOne({ email: 'bulk-confirm-race@example.com' });
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+    expect(await User.countDocuments({ email: 'bulk-confirm-race@example.com' })).toBe(1);
+    expect(await UserRoleAssignment.countDocuments({
+      userId: user._id,
+      organizationId,
+      roleId: memberRole._id,
+      departmentId: department._id,
+      status: 'ACTIVE',
+    })).toBe(1);
+    expect(sendWithResendMock).toHaveBeenCalledOnce();
+  });
+
+  it('denies department-only user permissions on organization-wide bulk operations', async () => {
+    const { organizationId, admin } = await createOrganizationContext('bulk-department-auth');
+    const department = await Department.create({ organizationId, name: 'Bulk Auth Department' });
+    const user = await createActiveUser({
+      organizationId,
+      email: 'bulk-department-only@example.com',
+      departmentId: department._id,
+    });
+    const role = await Role.create({
+      organizationId,
+      name: 'Department Bulk Operator',
+      roleType: 'CUSTOM',
+      assignmentScope: 'DEPARTMENT',
+      permissions: ['users.create', 'users.deactivate'],
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    });
+    await UserRoleAssignment.create({
+      userId: user._id,
+      roleId: role._id,
+      organizationId,
+      departmentId: department._id,
+      scopeType: 'DEPARTMENT',
+      status: 'ACTIVE',
+      assignedBy: admin._id,
+    });
+    const login = await loginRequest({ email: user.email, password: TEST_PASSWORD });
+    const token = login.body.data.accessToken;
+    const file = Buffer.from(
+      'firstName,lastName,email,employeeId,department,role,designation,phone\nNew,User,new@example.com,,,Employee,,',
+      'utf8'
+    );
+
+    const responses = await Promise.all([
+      request(app).get('/api/users/bulk-import/template').set(authHeader(token)),
+      request(app).post('/api/users/bulk-import/validate').set(authHeader(token))
+        .attach('file', file, { filename: 'department-only.csv', contentType: 'text/csv' }),
+      request(app).post('/api/users/bulk-import/confirm').set(authHeader(token))
+        .attach('file', file, { filename: 'department-only.csv', contentType: 'text/csv' }),
+      request(app).post('/api/users/bulk-import/failed-report').set(authHeader(token))
+        .attach('file', file, { filename: 'department-only.csv', contentType: 'text/csv' }),
+      request(app).post('/api/users/bulk-deactivate').set(authHeader(token))
+        .send({ userIds: [String(user._id)] }),
+      request(app).post('/api/users/bulk-membership-status').set(authHeader(token))
+        .send({ userIds: [String(user._id)], status: 'ACTIVE' }),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([403, 403, 403, 403, 403, 403]);
+    expect(await User.exists({ email: 'new@example.com' })).toBeNull();
+    expect((await User.findById(user._id)).organizationMemberships[0].status).toBe('ACTIVE');
+  });
+
+  it('bulk-deactivates eligible users, reports blocked users, and rejects duplicate IDs', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('bulk-deactivate');
+    const target = await createActiveUser({
+      organizationId,
+      email: 'bulk-deactivate-target@example.com',
+    });
+    const blocked = await createActiveUser({
+      organizationId,
+      email: 'bulk-deactivate-blocked@example.com',
+    });
+    const pending = await createActiveUser({
+      organizationId,
+      email: 'bulk-deactivate-pending@example.com',
+    });
+    await User.updateOne(
+      { _id: blocked._id },
+      {
+        $push: {
+          approvalDelegations: {
+            organizationId,
+            delegateId: admin._id,
+            scopeType: 'ORGANIZATION',
+            departmentId: null,
+            stageIds: [],
+            startsAt: new Date(Date.now() - 60_000),
+            endsAt: new Date(Date.now() + 60_000),
+            status: 'ACTIVE',
+          },
+        },
+      }
+    );
+    await ApprovalStep.create({
+      organizationId,
+      requestId: new mongoose.Types.ObjectId(),
+      attemptNumber: 1,
+      workflowDefinitionId: new mongoose.Types.ObjectId(),
+      workflowVersion: 1,
+      stageId: 'pending-stage',
+      sequence: 1,
+      stageName: 'Pending approval',
+      approverType: 'USER',
+      approverId: pending._id,
+      status: 'PENDING',
+    });
+    const otherOrganizationId = new mongoose.Types.ObjectId();
+    const otherUser = await createActiveUser({
+      organizationId: otherOrganizationId,
+      email: 'bulk-deactivate-other@example.com',
+    });
+
+    const response = await request(app)
+      .post('/api/users/bulk-deactivate')
+      .set(authHeader(token))
+      .send({ userIds: [String(target._id), String(blocked._id), String(pending._id), String(otherUser._id)] });
+    expect(response.status).toBe(200);
+    expect(response.body.data.summary).toMatchObject({ requested: 4, deactivated: 1, failed: 3 });
+    expect(response.body.data.results.map((result) => result.status)).toEqual([
+      'DEACTIVATED',
+      'FAILED',
+      'FAILED',
+      'FAILED',
+    ]);
+    expect(response.body.data.results[1].code).toBe('ACTIVE_APPROVAL_DELEGATION');
+    expect(response.body.data.results[2].code).toBe('PENDING_APPROVAL_RESPONSIBILITY');
+    expect(response.body.data.results[3].message).toContain('not found');
+    expect((await User.findById(target._id)).organizationMemberships[0].status).toBe('INACTIVE');
+    expect((await User.findById(blocked._id)).organizationMemberships[0].status).toBe('ACTIVE');
+    expect((await User.findById(pending._id)).organizationMemberships[0].status).toBe('ACTIVE');
+
+    const duplicateIds = await request(app)
+      .post('/api/users/bulk-deactivate')
+      .set(authHeader(token))
+      .send({ userIds: [String(target._id), String(target._id)] });
+    expect(duplicateIds.status).toBe(400);
+    expect(duplicateIds.body.code).toBe('VALIDATION_ERROR');
+    expect(await AuditLog.countDocuments({ action: 'BULK_USER_DEACTIVATION_COMPLETED' })).toBe(1);
+  });
+
+  it('bulk-reactivates memberships, including pending-setup accounts, without changing global account state', async () => {
+    const { organizationId, token } = await createOrganizationContext('bulk-reactivation');
+    const pending = await createActiveUser({
+      organizationId,
+      email: 'bulk-reactivation-pending@example.com',
+    });
+    await User.updateOne(
+      { _id: pending._id },
+      {
+        $set: {
+          accountStatus: 'INACTIVE',
+          passwordSetupRequired: true,
+          'organizationMemberships.0.status': 'INACTIVE',
+        },
+      }
+    );
+    const alreadyActive = await createActiveUser({
+      organizationId,
+      email: 'bulk-reactivation-active@example.com',
+    });
+    const otherOrganizationUser = await createActiveUser({
+      organizationId: new mongoose.Types.ObjectId(),
+      email: 'bulk-reactivation-other@example.com',
+    });
+
+    const response = await request(app)
+      .post('/api/users/bulk-membership-status')
+      .set(authHeader(token))
+      .send({
+        userIds: [String(pending._id), String(alreadyActive._id), String(otherOrganizationUser._id)],
+        status: 'ACTIVE',
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.summary).toEqual({
+      requested: 3,
+      activated: 1,
+      deactivated: 0,
+      failed: 1,
+    });
+    expect(response.body.data.results.map((result) => result.status)).toEqual([
+      'ACTIVATED',
+      'ALREADY_ACTIVE',
+      'FAILED',
+    ]);
+    const updatedPending = await User.findById(pending._id);
+    expect(updatedPending.accountStatus).toBe('INACTIVE');
+    expect(updatedPending.passwordSetupRequired).toBe(true);
+    expect(updatedPending.organizationMemberships[0].status).toBe('ACTIVE');
+
+    const invalidStatus = await request(app)
+      .post('/api/users/bulk-membership-status')
+      .set(authHeader(token))
+      .send({ userIds: [String(pending._id)], status: 'UNKNOWN' });
+    expect(invalidStatus.status).toBe(400);
+
+    const duplicateIds = await request(app)
+      .post('/api/users/bulk-membership-status')
+      .set(authHeader(token))
+      .send({ userIds: [String(pending._id), String(pending._id)], status: 'ACTIVE' });
+    expect(duplicateIds.status).toBe(400);
+    expect(await AuditLog.countDocuments({ action: 'BULK_USER_MEMBERSHIP_STATUS_COMPLETED' })).toBe(1);
+  });
+
+  it('serializes concurrent admin deactivations so one capable Organization Admin remains', async () => {
+    const { organizationId, admin, token } = await createOrganizationContext('bulk-admin-race');
+    const secondAdmin = await createActiveUser({
+      organizationId,
+      email: 'second-bulk-admin@example.com',
+    });
+    const adminRole = await Role.findOne({ organizationId, name: ORGANIZATION_ADMIN_ROLE_NAME });
+    await UserRoleAssignment.create({
+      userId: secondAdmin._id,
+      roleId: adminRole._id,
+      organizationId,
+      departmentId: null,
+      scopeType: 'ORGANIZATION',
+      status: 'ACTIVE',
+      assignedBy: admin._id,
+    });
+    const secondLogin = await loginRequest({ email: secondAdmin.email, password: TEST_PASSWORD });
+    expect(secondLogin.status).toBe(200);
+
+    const [firstAttempt, secondAttempt] = await Promise.all([
+      request(app)
+        .post('/api/users/bulk-deactivate')
+        .set(authHeader(token))
+        .send({ userIds: [String(secondAdmin._id)] }),
+      request(app)
+        .post('/api/users/bulk-deactivate')
+        .set(authHeader(secondLogin.body.data.accessToken))
+        .send({ userIds: [String(admin._id)] }),
+    ]);
+
+    const firstStatus = firstAttempt.body.data?.results?.[0]?.status;
+    const secondStatus = secondAttempt.body.data?.results?.[0]?.status;
+    expect([firstStatus, secondStatus].filter((status) => status === 'DEACTIVATED')).toHaveLength(1);
+    const activeMemberships = await User.find({
+      _id: { $in: [admin._id, secondAdmin._id] },
+      accountStatus: 'ACTIVE',
+      organizationMemberships: { $elemMatch: { organizationId, status: 'ACTIVE' } },
+    }).select('_id');
+    expect(activeMemberships).toHaveLength(1);
   });
 
   it('supports forgot, admin-initiated, and reset password flows with single-use tokens', async () => {

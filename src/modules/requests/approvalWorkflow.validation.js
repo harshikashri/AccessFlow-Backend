@@ -107,18 +107,19 @@ const validateAssignment = (stage) => {
   const assignment = stage.assignment || {};
   const type = stage.approverType || assignment.type;
   const resolution = assignment.resolution || (type === 'USER' ? 'DIRECT' : 'CLAIM_ONE');
-  const scopeType = assignment.scopeType ?? (type === 'ROLE' ? 'DEPARTMENT' : null);
+  const scopeType = assignment.scopeType ?? null;
   if (!['DEPARTMENT_MANAGER', 'ROLE', 'USER', 'ORGANIZATION_ADMIN'].includes(type)) {
     fail('Invalid approval stage assignment type.');
   }
   if (!['DIRECT', 'CLAIM_ONE'].includes(resolution)) fail('Invalid approval stage resolution.');
-  if (scopeType !== null && !['DEPARTMENT', 'ORGANIZATION', 'ORGANIZATION_OR_DEPARTMENT'].includes(scopeType)) {
+  if (scopeType !== null && !['DEPARTMENT', 'ORGANIZATION'].includes(scopeType)) {
     fail('Invalid role approval scope.');
   }
   if (resolution === 'CLAIM_ONE' && stage.approvalMode === 'ALL') {
     fail('CLAIM_ONE cannot be combined with ALL approval mode.');
   }
   if (type === 'ROLE' && !assignment.roleId) fail('Role approval stages require roleId.');
+  if (type === 'ROLE' && !scopeType) fail('Role approval stages require an explicit approver scope.');
   if (type === 'USER' && !assignment.userId) fail('User approval stages require userId.');
   return {
     type,

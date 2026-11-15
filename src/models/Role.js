@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { PERMISSION_CATALOG, ROLE_TYPES } from '../config/constants.js';
+import { PERMISSION_CATALOG, ROLE_TYPES, SCOPE_TYPES } from '../config/constants.js';
 
 const roleSchema = new mongoose.Schema(
   {
@@ -34,6 +34,15 @@ const roleSchema = new mongoose.Schema(
       type: String,
       enum: ['GENERAL', 'FINANCE_APPROVER'],
       default: 'GENERAL',
+    },
+    assignmentScope: {
+      type: String,
+      enum: SCOPE_TYPES,
+      default: null,
+    },
+    assignmentScopes: {
+      type: [{ type: String, enum: SCOPE_TYPES }],
+      default: undefined,
     },
     permissions: {
       type: [String],

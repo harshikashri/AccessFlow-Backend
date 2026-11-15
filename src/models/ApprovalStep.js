@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { APPROVER_TYPES, APPROVAL_STATUSES } from '../config/constants.js';
+import { APPROVER_TYPES, APPROVAL_STATUSES, SCOPE_TYPES } from '../config/constants.js';
 
 const approvalStepSchema = new mongoose.Schema(
   {
@@ -54,6 +54,11 @@ const approvalStepSchema = new mongoose.Schema(
       type: String,
       enum: ['DIRECT', 'CLAIM_ONE'],
       default: 'DIRECT',
+    },
+    scopeType: {
+      type: String,
+      enum: [...SCOPE_TYPES, 'ORGANIZATION_OR_DEPARTMENT'],
+      default: null,
     },
     approvalMode: {
       type: String,

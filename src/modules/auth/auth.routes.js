@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { authenticate } from '../../middleware/authenticate.js';
-import { authRateLimiter } from '../../middleware/authRateLimit.js';
+import {
+  authRateLimiter,
+  forgotPasswordAccountRateLimiter,
+  loginAccountRateLimiter,
+  passwordResetRateLimiter,
+} from '../../middleware/authRateLimit.js';
 import { validateAuthOrigin } from '../../middleware/validateOrigin.js';
 import * as authController from './auth.controller.js';
 import { loadAuthContext } from './auth.service.js';
@@ -46,6 +51,7 @@ const softAuthenticate = async (req, res, next) => {
 router.post(
   '/login',
   authRateLimiter,
+  loginAccountRateLimiter,
   validateAuthOrigin,
   asyncHandler(authController.login)
 );
@@ -60,6 +66,7 @@ router.post(
 router.post(
   '/set-password',
   authRateLimiter,
+  passwordResetRateLimiter,
   validateAuthOrigin,
   asyncHandler(authController.setPassword)
 );
@@ -67,6 +74,8 @@ router.post(
 router.post(
   '/forgot-password',
   authRateLimiter,
+  passwordResetRateLimiter,
+  forgotPasswordAccountRateLimiter,
   validateAuthOrigin,
   asyncHandler(authController.forgotPassword)
 );
@@ -74,6 +83,7 @@ router.post(
 router.post(
   '/reset-password',
   authRateLimiter,
+  passwordResetRateLimiter,
   validateAuthOrigin,
   asyncHandler(authController.resetPassword)
 );

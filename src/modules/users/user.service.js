@@ -5,6 +5,8 @@ import Organization from '../../models/Organization.js';
 import Department from '../../models/Department.js';
 import Role from '../../models/Role.js';
 import UserRoleAssignment from '../../models/UserRoleAssignment.js';
+import ApprovalStep from '../../models/ApprovalStep.js';
+import Request from '../../models/Request.js';
 import Session from '../../models/Session.js';
 import AuditLog from '../../models/AuditLog.js';
 import { AppError } from '../../utils/AppError.js';
@@ -12,6 +14,7 @@ import { hashPassword } from '../../utils/password.js';
 import { hashToken } from '../../utils/token.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { ORGANIZATION_ADMIN_ROLE_NAME } from '../../config/constants.js';
+import { REQUIRED_ADMIN_PERMISSIONS } from '../roles/role.constants.js';
 import { sendInitialSetupInstructions, issueAccountSetupToken, issuePasswordResetToken } from '../auth/password-reset.service.js';
 import { USER_SETUP_TOKEN_TTL_MS, USER_ACTIONS } from './user.constants.js';
 import { escapeRegex, getScopedDepartmentIds, toPublicUser } from './user.utils.js';
@@ -91,7 +94,7 @@ const getRoleAssignments = async (userIds, organizationId) => {
 		organizationId,
 		status: 'ACTIVE',
 	})
-		.populate({ path: 'roleId', select: 'name status' })
+		.populate({ path: 'roleId', select: 'name status roleType rolePurpose assignmentScope assignmentScopes' })
 		.lean();
 	const byUser = new Map();
 	for (const assignment of assignments) {
@@ -111,7 +114,7 @@ const mapDuplicateError = (error) => {
 
 const getUserInOrganization = async ({ userId, organizationId, session }) => {
 	let query = User.findOne({ _id: userId, 'organizationMemberships.organizationId': organizationId })
-		.select('name email accountStatus passwordSetupRequired organizationMemberships createdAt updatedAt');
+		.select('name email accountStatus passwordSetupRequired organizationMemberships approvalDelegations createdAt updatedAt');
 	if (session) query = query.session(session);
 	return query;
 };
@@ -127,7 +130,13 @@ const ensureDepartmentIsActive = async ({ departmentId, organizationId, session 
 	return department;
 };
 
-export const createUser = async ({ organizationId, actorId, access, input }) => {
+export const createUser = async ({
+	organizationId,
+	actorId,
+	access,
+	input,
+	includeDefaultMemberRole = true,
+}) => {
 	const rawSetupToken = crypto.randomBytes(32).toString('base64url');
 	const setupTokenHash = hashToken(rawSetupToken);
 	const setupTokenExpiresAt = new Date(Date.now() + USER_SETUP_TOKEN_TTL_MS);
@@ -140,7 +149,7 @@ export const createUser = async ({ organizationId, actorId, access, input }) => 
 			const organization = await assertActiveOrganization(organizationId, session);
 			await ensureDepartmentIsActive({ departmentId: input.departmentId, organizationId, session });
 			let requestedAssignments = [...input.roleAssignments];
-			if (input.departmentId) {
+			if (input.departmentId && includeDefaultMemberRole) {
 				const requestedRoleIds = requestedAssignments.map((assignment) => assignment.roleId);
 				const managerRoleRequested = requestedRoleIds.length > 0 && await Role.exists({
 					_id: { $in: requestedRoleIds },
@@ -459,11 +468,14 @@ export const assignUserDepartment = async ({ userId, organizationId, actorId, ac
 	});
 
 const getOrganizationAdminRoleIds = async ({ organizationId, session }) => {
-	const roleQuery = Role.find({ organizationId }).select('_id name roleType');
+	const roleQuery = Role.find({ organizationId, status: 'ACTIVE' }).select('_id name roleType permissions');
 	if (session) roleQuery.session(session);
 	const roles = await roleQuery;
 	return roles
-		.filter((role) => role.roleType === 'ORGANIZATION_ADMIN' || role.name === ORGANIZATION_ADMIN_ROLE_NAME)
+		.filter((role) =>
+			(role.roleType === 'ORGANIZATION_ADMIN' || role.name === ORGANIZATION_ADMIN_ROLE_NAME) &&
+			REQUIRED_ADMIN_PERMISSIONS.every((permission) => (role.permissions || []).includes(permission))
+		)
 		.map((role) => role._id);
 };
 
@@ -489,19 +501,139 @@ const countActiveOrganizationAdmins = async ({ organizationId, session }) => {
 	return countQuery;
 };
 
-export const activateUser = async ({ userId, organizationId, actorId, access }) =>
+const assertNoPendingApprovalResponsibilities = async ({ user, organizationId, session }) => {
+	const pendingStatuses = ['PENDING', 'ACTIVE', 'CLAIMED'];
+	const now = new Date();
+	const activeDelegation = user.approvalDelegations?.some((delegation) =>
+		String(delegation.organizationId) === String(organizationId) &&
+		delegation.status === 'ACTIVE' &&
+		new Date(delegation.endsAt) > now
+	);
+	if (activeDelegation) {
+		throw new AppError(
+			'Active approval delegations must be revoked before this user can be deactivated.',
+			409,
+			'ACTIVE_APPROVAL_DELEGATION'
+		);
+	}
+
+	const delegateQuery = User.exists({
+		approvalDelegations: {
+			$elemMatch: {
+				organizationId,
+				delegateId: user._id,
+				status: 'ACTIVE',
+				endsAt: { $gt: now },
+			},
+		},
+	});
+	const directResponsibilityQuery = ApprovalStep.exists({
+		organizationId,
+		status: { $in: pendingStatuses },
+		$or: [{ approverId: user._id }, { claimedBy: user._id }],
+	});
+	const [isActiveDelegate, hasDirectResponsibility] = await Promise.all([
+		session ? delegateQuery.session(session) : delegateQuery,
+		session ? directResponsibilityQuery.session(session) : directResponsibilityQuery,
+	]);
+	if (isActiveDelegate) {
+		throw new AppError(
+			'Active approval delegations naming this user must be revoked before deactivation.',
+			409,
+			'ACTIVE_APPROVAL_DELEGATION'
+		);
+	}
+	if (hasDirectResponsibility) {
+		throw new AppError(
+			'Pending or claimed approval responsibilities must be reassigned before this user can be deactivated.',
+			409,
+			'PENDING_APPROVAL_RESPONSIBILITY'
+		);
+	}
+
+	const assignmentQuery = UserRoleAssignment.find({
+		userId: user._id,
+		organizationId,
+		status: 'ACTIVE',
+	}).distinct('roleId');
+	if (session) assignmentQuery.session(session);
+	const roleIds = (await assignmentQuery).map(String);
+	const adminRoleIds = await getOrganizationAdminRoleIds({ organizationId, session });
+	const hasOrganizationAdminAssignment = roleIds.some((roleId) =>
+		adminRoleIds.some((adminRoleId) => String(adminRoleId) === roleId)
+	);
+	const roleObjectIds = [...new Set(roleIds)].map((roleId) => new mongoose.Types.ObjectId(roleId));
+	const indirectConditions = [];
+	if (roleObjectIds.length) indirectConditions.push({ approverType: 'ROLE', roleId: { $in: roleObjectIds } });
+	if (hasOrganizationAdminAssignment) indirectConditions.push({ approverType: 'ORGANIZATION_ADMIN' });
+	const indirectRoleResponsibility = indirectConditions.length
+		? ApprovalStep.exists({
+			organizationId,
+			status: { $in: pendingStatuses },
+			$or: indirectConditions,
+		})
+		: Promise.resolve(false);
+
+	const memberships = user.organizationMemberships.filter(
+		(membership) => String(membership.organizationId) === String(organizationId)
+	);
+	const departmentIds = memberships.map((membership) => membership.departmentId).filter(Boolean);
+	const managerDepartmentsQuery = Department.find({
+		organizationId,
+		managerIds: user._id,
+		status: 'ACTIVE',
+	}).distinct('_id');
+	if (session) managerDepartmentsQuery.session(session);
+	const managerDepartmentIds = await managerDepartmentsQuery;
+	const allDepartmentIds = [...new Set([...departmentIds, ...managerDepartmentIds].map(String))]
+		.map((departmentId) => new mongoose.Types.ObjectId(departmentId));
+	let managerResponsibility = Promise.resolve(false);
+	if (allDepartmentIds.length) {
+		const requestsQuery = Request.find({
+			organizationId,
+			status: 'PENDING_APPROVAL',
+			departmentId: { $in: allDepartmentIds },
+		}).distinct('_id');
+		if (session) requestsQuery.session(session);
+		const requestIds = await requestsQuery;
+		if (requestIds.length) {
+			managerResponsibility = ApprovalStep.exists({
+				organizationId,
+				requestId: { $in: requestIds },
+				approverType: 'DEPARTMENT_MANAGER',
+				status: { $in: pendingStatuses },
+			});
+		}
+	}
+	const [hasRoleResponsibility, hasManagerResponsibility] = await Promise.all([
+		session ? indirectRoleResponsibility.session?.(session) || indirectRoleResponsibility : indirectRoleResponsibility,
+		session ? managerResponsibility.session?.(session) || managerResponsibility : managerResponsibility,
+	]);
+	if (hasRoleResponsibility || hasManagerResponsibility) {
+		throw new AppError(
+			'Pending workflow approvals depend on this user or their current role; reassign them before deactivation.',
+			409,
+			'PENDING_APPROVAL_RESPONSIBILITY'
+		);
+	}
+};
+
+export const activateUser = async ({
+	userId,
+	organizationId,
+	actorId,
+	access,
+	returnOutcome = false,
+}) =>
 	withTransaction(async (session) => {
 		await assertActiveOrganization(organizationId, session);
 		const user = await getUserInOrganization({ userId, organizationId, session });
 		if (!user) throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
 		const membership = assertUserScope(user, organizationId, access, 'users.deactivate');
-		if (user.passwordSetupRequired) {
-			throw new AppError('User must complete password setup before activation.', 409, 'PASSWORD_SETUP_REQUIRED');
+		if (membership.status === 'ACTIVE') {
+			const profile = await makePublicProfile(user, organizationId, membership);
+			return returnOutcome ? { profile, changed: false } : profile;
 		}
-		if (user.accountStatus !== 'ACTIVE') {
-			throw new AppError('The global account is inactive and cannot be activated by an organization.', 403, 'ACCOUNT_INACTIVE');
-		}
-		if (membership.status === 'ACTIVE') return makePublicProfile(user, organizationId, membership);
 
 		membership.status = 'ACTIVE';
 		await user.save({ session });
@@ -512,10 +644,11 @@ export const activateUser = async ({ userId, organizationId, actorId, access }) 
 			userId: user._id,
 			changes: { membershipStatus: { from: 'INACTIVE', to: 'ACTIVE' } },
 		});
-		return makePublicProfile(user, organizationId, membership);
+		const profile = await makePublicProfile(user, organizationId, membership);
+		return returnOutcome ? { profile, changed: true } : profile;
 	});
 
-export const deactivateUser = async ({ userId, organizationId, actorId, access }) =>
+export const deactivateUser = async ({ userId, organizationId, actorId, access, returnOutcome = false }) =>
 	withTransaction(async (session) => {
 		await assertActiveOrganization(organizationId, session);
 		if (String(userId) === String(actorId)) {
@@ -524,7 +657,21 @@ export const deactivateUser = async ({ userId, organizationId, actorId, access }
 		const user = await getUserInOrganization({ userId, organizationId, session });
 		if (!user) throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
 		const membership = assertUserScope(user, organizationId, access, 'users.deactivate');
-		if (membership.status === 'INACTIVE') return makePublicProfile(user, organizationId, membership);
+		if (membership.status === 'INACTIVE') {
+			const profile = await makePublicProfile(user, organizationId, membership);
+			return returnOutcome ? { profile, changed: false } : profile;
+		}
+
+		const organizationWrite = await Organization.updateOne(
+			{ _id: organizationId, status: 'ACTIVE' },
+			{ $inc: { __v: 1 } },
+			{ session }
+		);
+		if (organizationWrite.matchedCount !== 1) {
+			throw new AppError('This organization is inactive.', 403, 'ORGANIZATION_INACTIVE');
+		}
+
+		await assertNoPendingApprovalResponsibilities({ user, organizationId, session });
 
 		const organizationAdminRoleIds = await getOrganizationAdminRoleIds({ organizationId, session });
 		if (organizationAdminRoleIds.length) {
@@ -556,7 +703,8 @@ export const deactivateUser = async ({ userId, organizationId, actorId, access }
 			userId: user._id,
 			changes: { membershipStatus: { from: previousStatus, to: 'INACTIVE' }, sessionsRevokedForOrganization: true },
 		});
-		return makePublicProfile(user, organizationId, membership);
+		const profile = await makePublicProfile(user, organizationId, membership);
+		return returnOutcome ? { profile, changed: true } : profile;
 	});
 
 export const initiateAdminPasswordReset = async ({ userId, organizationId, actorId, access }) => {

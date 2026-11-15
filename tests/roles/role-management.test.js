@@ -89,7 +89,10 @@ const createActiveMember = async ({ organizationId, email, departmentId = null, 
   });
 
 const createRole = async (token, body) =>
-  request(app).post('/api/roles').set(authHeader(token)).send(body);
+  request(app).post('/api/roles').set(authHeader(token)).send({
+    ...(body.assignmentScopes ? {} : { assignmentScope: 'ORGANIZATION' }),
+    ...body,
+  });
 
 const assignRole = async (token, roleId, body) =>
   request(app).post(`/api/roles/${roleId}/assign`).set(authHeader(token)).send(body);
@@ -120,6 +123,7 @@ describe('Dynamic Role Management', () => {
       organizationId: String(organizationId),
       name: 'Report Viewer',
       roleType: 'CUSTOM',
+      assignmentScope: 'ORGANIZATION',
       permissions: ['users.view', 'dashboard.view'],
       status: 'ACTIVE',
       createdBy: String(admin._id),
@@ -171,6 +175,96 @@ describe('Dynamic Role Management', () => {
     expect(await AuditLog.countDocuments({ action: 'ROLE_UPDATED', resourceId: created.body.data.id })).toBe(1);
   });
 
+  it('requires and exposes custom assignment scope while preserving history during reconfiguration', async () => {
+    const { organizationId, token } = await createOrganizationContext('custom-role-scope');
+    const missingScope = await request(app)
+      .post('/api/roles')
+      .set(authHeader(token))
+      .send({ name: 'Missing Scope Role', permissions: ['users.view'] });
+    expect(missingScope.status).toBe(400);
+    expect(missingScope.body.code).toBe('ROLE_ASSIGNMENT_SCOPE_REQUIRED');
+
+    const role = await createRole(token, {
+      name: 'Configurable Scope Role',
+      assignmentScope: 'ORGANIZATION',
+      permissions: ['users.view'],
+    });
+    expect(role.status).toBe(201);
+    expect(role.body.data.assignmentScope).toBe('ORGANIZATION');
+    const user = await createActiveMember({ organizationId, email: 'configurable-scope@example.com' });
+    const assigned = await assignRole(token, role.body.data.id, {
+      userId: String(user._id),
+      scopeType: 'ORGANIZATION',
+    });
+    expect(assigned.status).toBe(201);
+    expect(assigned.body.data.assignmentScope).toBe('ORGANIZATION');
+
+    const conflictingUpdate = await request(app)
+      .patch(`/api/roles/${role.body.data.id}`)
+      .set(authHeader(token))
+      .send({ assignmentScope: 'DEPARTMENT' });
+    expect(conflictingUpdate.status).toBe(409);
+    expect(conflictingUpdate.body.code).toBe('ROLE_SCOPE_ASSIGNMENTS_CONFLICT');
+    expect(await UserRoleAssignment.countDocuments({
+      roleId: role.body.data.id,
+      status: 'ACTIVE',
+      scopeType: 'ORGANIZATION',
+    })).toBe(1);
+
+    const removed = await request(app)
+      .delete(`/api/roles/${role.body.data.id}/assign/${user._id}`)
+      .set(authHeader(token))
+      .send({ scopeType: 'ORGANIZATION' });
+    expect(removed.status).toBe(200);
+    const configured = await request(app)
+      .patch(`/api/roles/${role.body.data.id}`)
+      .set(authHeader(token))
+      .send({ assignmentScope: 'DEPARTMENT' });
+    expect(configured.status).toBe(200);
+    expect(configured.body.data.assignmentScope).toBe('DEPARTMENT');
+    expect(await UserRoleAssignment.countDocuments({
+      roleId: role.body.data.id,
+      status: 'INACTIVE',
+      scopeType: 'ORGANIZATION',
+    })).toBe(1);
+    const detail = await request(app)
+      .get(`/api/roles/${role.body.data.id}`)
+      .set(authHeader(token));
+    expect(detail.body.data.assignmentScope).toBe('DEPARTMENT');
+  });
+
+  it('blocks assigning legacy unconfigured custom roles until explicitly configured', async () => {
+    const { organizationId, token, admin } = await createOrganizationContext('legacy-role-scope');
+    const role = await Role.create({
+      organizationId,
+      name: 'Legacy Custom Role',
+      roleType: 'CUSTOM',
+      assignmentScope: null,
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: admin._id,
+    });
+    const user = await createActiveMember({ organizationId, email: 'legacy-scope-user@example.com' });
+    const rejected = await assignRole(token, String(role._id), {
+      userId: String(user._id),
+      scopeType: 'ORGANIZATION',
+    });
+    expect(rejected.status).toBe(409);
+    expect(rejected.body.code).toBe('ROLE_ASSIGNMENT_SCOPE_UNCONFIGURED');
+
+    const configured = await request(app)
+      .patch(`/api/roles/${role._id}`)
+      .set(authHeader(token))
+      .send({ assignmentScope: 'ORGANIZATION' });
+    expect(configured.status).toBe(200);
+    expect(configured.body.data.assignmentScope).toBe('ORGANIZATION');
+    const accepted = await assignRole(token, String(role._id), {
+      userId: String(user._id),
+      scopeType: 'ORGANIZATION',
+    });
+    expect(accepted.status).toBe(201);
+  });
+
   it('returns the centralized permission catalog and rejects non-admin and platform-only access', async () => {
     const local = await createOrganizationContext('auth-local');
     const foreign = await createOrganizationContext('auth-foreign');
@@ -202,7 +296,10 @@ describe('Dynamic Role Management', () => {
     const hr = await Department.create({ organizationId, name: 'Human Resources' });
     const user = await createActiveMember({ organizationId, email: 'finance-employee@example.com' });
     const financeApprover = await createRole(token, {
-      name: 'Finance Approver', roleType: 'CUSTOM', permissions: ['requests.view', 'requests.approve'],
+      name: 'Finance Approver',
+      roleType: 'CUSTOM',
+      assignmentScope: 'DEPARTMENT',
+      permissions: ['requests.view', 'requests.approve'],
     });
     const reportViewer = await createRole(token, {
       name: 'Report Viewer', roleType: 'CUSTOM', permissions: ['dashboard.view'],
@@ -361,12 +458,18 @@ describe('Dynamic Role Management', () => {
     const foreign = await createOrganizationContext('scope-foreign');
     const localDepartment = await Department.create({ organizationId: local.organizationId, name: 'Local Dept' });
     const foreignDepartment = await Department.create({ organizationId: foreign.organizationId, name: 'Foreign Dept' });
-    const role = await createRole(local.token, { name: 'Scoped Viewer', permissions: ['users.view'] });
+    const role = await createRole(local.token, {
+      name: 'Scoped Viewer',
+      assignmentScope: 'DEPARTMENT',
+      permissions: ['users.view'],
+    });
     const localUser = await createActiveMember({ organizationId: local.organizationId, email: 'local-role-user@example.com' });
     const foreignUser = await createActiveMember({ organizationId: foreign.organizationId, email: 'foreign-role-user@example.com' });
 
     const badUser = await assignRole(local.token, role.body.data.id, {
-      userId: String(foreignUser._id), scopeType: 'ORGANIZATION',
+      userId: String(foreignUser._id),
+      scopeType: 'DEPARTMENT',
+      departmentId: String(localDepartment._id),
     });
     expect(badUser.status).toBe(400);
     expect(badUser.body.code).toBe('INVALID_ROLE_USER');
@@ -490,6 +593,7 @@ describe('Dynamic Role Management', () => {
       organizationId,
       name: 'Membership Operator',
       roleType: 'CUSTOM',
+      assignmentScope: 'ORGANIZATION',
       permissions: ['users.deactivate'],
       status: 'ACTIVE',
       createdBy: admin._id,
@@ -519,20 +623,19 @@ describe('Dynamic Role Management', () => {
     expect(deactivate.body.code).toBe('LAST_ORGANIZATION_ADMIN');
   });
 
-  it('manages the same role independently at different scopes and allows reassignment after unassignment', async () => {
+  it('preserves department role assignment history when reassigned', async () => {
     const { organizationId, token } = await createOrganizationContext('assignment-history');
     const firstDepartment = await Department.create({ organizationId, name: 'First Department' });
     const secondDepartment = await Department.create({ organizationId, name: 'Second Department' });
     const user = await createActiveMember({ organizationId, email: 'assignment-history@example.com' });
-    const role = await createRole(token, { name: 'Scoped Reader', permissions: ['users.view'] });
-
-    const organizationAssignment = await assignRole(token, role.body.data.id, {
-      userId: String(user._id), scopeType: 'ORGANIZATION',
+    const role = await createRole(token, {
+      name: 'Scoped Reader',
+      assignmentScope: 'DEPARTMENT',
+      permissions: ['users.view'],
     });
     const departmentAssignment = await assignRole(token, role.body.data.id, {
       userId: String(user._id), scopeType: 'DEPARTMENT', departmentId: String(firstDepartment._id),
     });
-    expect(organizationAssignment.status).toBe(201);
     expect(departmentAssignment.status).toBe(201);
 
     const removed = await request(app)
@@ -555,7 +658,7 @@ describe('Dynamic Role Management', () => {
       userId: user._id,
       roleId: role.body.data.id,
       status: 'ACTIVE',
-    })).toBe(2);
+    })).toBe(1);
   });
 
   it('updates assignment scope atomically and preserves assignment eligibility checks', async () => {
@@ -563,7 +666,11 @@ describe('Dynamic Role Management', () => {
     const firstDepartment = await Department.create({ organizationId, name: 'Scope Update One' });
     const secondDepartment = await Department.create({ organizationId, name: 'Scope Update Two' });
     const user = await createActiveMember({ organizationId, email: 'scope-update@example.com' });
-    const role = await createRole(token, { name: 'Scope Update Role', permissions: ['users.view'] });
+    const role = await createRole(token, {
+      name: 'Scope Update Role',
+      assignmentScope: 'DEPARTMENT',
+      permissions: ['users.view'],
+    });
     const created = await assignRole(token, role.body.data.id, {
       userId: String(user._id),
       scopeType: 'DEPARTMENT',
@@ -623,26 +730,59 @@ describe('Dynamic Role Management', () => {
     expect(inactiveDepartment.body.code).toBe('INVALID_ROLE_DEPARTMENT');
   });
 
-  it('requires Finance Approver roles to be assigned within a department', async () => {
+  it('supports both scopes for custom Finance Approver roles and protects active assignments', async () => {
     const { organizationId, token } = await createOrganizationContext('finance-assignment-scope');
     const department = await Department.create({ organizationId, name: 'Finance Assignment Scope' });
+    const modelFinanceRole = await Role.create({
+      organizationId,
+      name: 'Model Finance Role Without Scope',
+      roleType: 'CUSTOM',
+      rolePurpose: 'FINANCE_APPROVER',
+      permissions: ['requests.approve'],
+      status: 'ACTIVE',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+    expect(modelFinanceRole.rolePurpose).toBe('FINANCE_APPROVER');
+    const missingScope = await request(app)
+      .post('/api/roles')
+      .set(authHeader(token))
+      .send({
+        name: 'Unconfigured Finance Purpose',
+        rolePurpose: 'FINANCE_APPROVER',
+        permissions: ['requests.approve'],
+      });
+    expect(missingScope.status).toBe(400);
+    expect(missingScope.body.code).toBe('ROLE_ASSIGNMENT_SCOPE_REQUIRED');
+
+    const organizationScope = await request(app)
+      .post('/api/roles')
+      .set(authHeader(token))
+      .send({
+        name: 'Organization Finance Purpose',
+        rolePurpose: 'FINANCE_APPROVER',
+        assignmentScope: 'ORGANIZATION',
+        permissions: ['requests.approve'],
+      });
+    expect(organizationScope.status).toBe(201);
+    expect(organizationScope.body.data.assignmentScopes).toEqual(['ORGANIZATION']);
+
+    const financeRole = await createRole(token, {
+      name: 'Department Finance Approver',
+      rolePurpose: 'FINANCE_APPROVER',
+      assignmentScopes: ['ORGANIZATION', 'DEPARTMENT'],
+      permissions: ['requests.approve'],
+    });
     const user = await createActiveMember({
       organizationId,
       email: 'finance-assignment-scope@example.com',
       departmentId: department._id,
     });
-    const financeRole = await createRole(token, {
-      name: 'Department Finance Approver',
-      rolePurpose: 'FINANCE_APPROVER',
-      permissions: ['requests.approve'],
-    });
-
     const organizationAssignment = await assignRole(token, financeRole.body.data.id, {
       userId: String(user._id),
       scopeType: 'ORGANIZATION',
     });
-    expect(organizationAssignment.status).toBe(400);
-    expect(organizationAssignment.body.code).toBe('INVALID_ROLE_SCOPE');
+    expect(organizationAssignment.status).toBe(201);
+    expect(organizationAssignment.body.data.assignmentScopes).toEqual(['ORGANIZATION', 'DEPARTMENT']);
 
     const departmentAssignment = await assignRole(token, financeRole.body.data.id, {
       userId: String(user._id),
@@ -650,5 +790,24 @@ describe('Dynamic Role Management', () => {
       departmentId: String(department._id),
     });
     expect(departmentAssignment.status).toBe(201);
+
+    const blockedScopeRemoval = await request(app)
+      .patch(`/api/roles/${financeRole.body.data.id}`)
+      .set(authHeader(token))
+      .send({ assignmentScopes: ['DEPARTMENT'] });
+    expect(blockedScopeRemoval.status).toBe(409);
+    expect(blockedScopeRemoval.body.code).toBe('ROLE_SCOPE_ASSIGNMENTS_CONFLICT');
+
+    const removedOrganizationAssignment = await request(app)
+      .delete(`/api/roles/${financeRole.body.data.id}/assign/${user._id}`)
+      .set(authHeader(token))
+      .send({ scopeType: 'ORGANIZATION' });
+    expect(removedOrganizationAssignment.status).toBe(200);
+    const configuredDepartmentOnly = await request(app)
+      .patch(`/api/roles/${financeRole.body.data.id}`)
+      .set(authHeader(token))
+      .send({ assignmentScopes: ['DEPARTMENT'] });
+    expect(configuredDepartmentOnly.status).toBe(200);
+    expect(configuredDepartmentOnly.body.data.assignmentScopes).toEqual(['DEPARTMENT']);
   });
 });

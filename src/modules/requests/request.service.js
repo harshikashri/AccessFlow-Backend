@@ -20,7 +20,7 @@ import {
 } from './approvalRuntime.service.js';
 
 const writeAuditLog = async (session, { organizationId, actorId, action, resourceType, resourceId, changes = {} }) => {
-  await AuditLog.create([{
+  const entries = [{
     organizationId,
     actorId,
     action,
@@ -28,7 +28,23 @@ const writeAuditLog = async (session, { organizationId, actorId, action, resourc
     resourceId,
     changes,
     timestamp: new Date(),
-  }], { session });
+  }];
+  await AuditLog.create(entries, session ? { session } : {});
+};
+
+const recordApprovalResolutionFailure = async ({ organizationId, actorId, requestId, error }) => {
+  if (error?.code !== 'NO_ELIGIBLE_APPROVER') return;
+  await writeAuditLog(null, {
+    organizationId,
+    actorId,
+    action: 'APPROVAL_RESOLUTION_FAILED',
+    resourceType: 'Request',
+    resourceId: requestId,
+    changes: {
+      code: error.code,
+      ...(error.details || {}),
+    },
+  });
 };
 
 const assertActiveOrganization = async (organizationId, session) => {
@@ -786,8 +802,9 @@ export const updateRequest = async ({ organizationId, actorId, access, requestId
     return toPublicRequest(request);
   });
 
-export const submitRequest = async ({ organizationId, actorId, access, requestId }) =>
-  withTransaction(async (session) => {
+export const submitRequest = async ({ organizationId, actorId, access, requestId }) => {
+  try {
+    return await withTransaction(async (session) => {
     const request = await getRequest({ organizationId, requestId, session });
     assertOwnRequest(request, actorId);
     if (!access.organizationPermissions.has('requests.submit') &&
@@ -808,11 +825,17 @@ export const submitRequest = async ({ organizationId, actorId, access, requestId
       organizationId, actorId, action: REQUEST_ACTIONS.SUBMITTED, resourceType: 'Request',
       resourceId: request._id, changes: { status: request.status, submittedAt: request.submittedAt },
     });
-    return toPublicRequest(request);
-  });
+      return toPublicRequest(request);
+    });
+  } catch (error) {
+    await recordApprovalResolutionFailure({ organizationId, actorId, requestId, error });
+    throw error;
+  }
+};
 
-export const resubmitRequest = async ({ organizationId, actorId, access, requestId }) =>
-  withTransaction(async (session) => {
+export const resubmitRequest = async ({ organizationId, actorId, access, requestId }) => {
+  try {
+    return await withTransaction(async (session) => {
     const request = await getRequest({ organizationId, requestId, session });
     assertOwnRequest(request, actorId);
     if (request.status !== 'RETURNED') {
@@ -862,8 +885,13 @@ export const resubmitRequest = async ({ organizationId, actorId, access, request
       resourceId: request._id,
       changes: { attemptNumber, workflowVersion: previous.workflowVersion },
     });
-    return toPublicRequest(request);
-  });
+      return toPublicRequest(request);
+    });
+  } catch (error) {
+    await recordApprovalResolutionFailure({ organizationId, actorId, requestId, error });
+    throw error;
+  }
+};
 
 const requestForTracking = async ({ organizationId, actorId, access, requestId }) => {
   const requestVisibility = await resolveRequestVisibility({ organizationId, actorId, access });
@@ -944,6 +972,7 @@ export const getApprovalHistory = async ({ organizationId, actorId, access, requ
         status: representative.status,
         approverType: representative.approverType,
         assignmentResolution: representative.assignmentResolution,
+        scopeType: representative.scopeType || null,
         approverIds: [...new Set(stageSteps.filter((step) => step.approverId).map((step) => String(step.approverId)))],
       },
     });

@@ -16,10 +16,11 @@ import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
 import auditRoutes from './modules/audit/audit.routes.js';
 import settingsRoutes from './modules/settings/settings.routes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
+import { apiRateLimiter } from './middleware/rateLimiters.js';
 
 const app = express();
 
-app.set('trust proxy', 1);
+app.set('trust proxy', env.TRUST_PROXY);
 
 app.use(
   cors({
@@ -30,6 +31,7 @@ app.use(
 
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
+app.use('/api', apiRateLimiter);
 
 app.get('/health', (req, res) => {
   res.status(200).json({

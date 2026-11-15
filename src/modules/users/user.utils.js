@@ -1,3 +1,5 @@
+import { getSupportedRoleScopes } from '../roles/role.scope.js';
+
 export const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export const getScopedDepartmentIds = (access, permission) => {
@@ -22,13 +24,18 @@ export const toPublicUser = (user, membership, department = null, roleAssignment
   email: user.email,
   accountStatus: user.accountStatus,
   membership: toPublicMembership(membership, department),
-  roleAssignments: roleAssignments.map((assignment) => ({
-    roleId: String(assignment.roleId?._id || assignment.roleId),
-    roleName: assignment.roleId?.name || assignment.roleName || null,
-    scopeType: assignment.scopeType,
-    departmentId: assignment.departmentId ? String(assignment.departmentId) : null,
-    status: assignment.status,
-  })),
+  roleAssignments: roleAssignments.map((assignment) => {
+    const assignmentScopes = assignment.roleId ? getSupportedRoleScopes(assignment.roleId) : [];
+    return {
+      roleId: String(assignment.roleId?._id || assignment.roleId),
+      roleName: assignment.roleId?.name || assignment.roleName || null,
+      assignmentScope: assignmentScopes.length === 1 ? assignmentScopes[0] : null,
+      assignmentScopes,
+      scopeType: assignment.scopeType,
+      departmentId: assignment.departmentId ? String(assignment.departmentId) : null,
+      status: assignment.status,
+    };
+  }),
   createdAt: user.createdAt,
   updatedAt: user.updatedAt,
 });

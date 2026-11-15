@@ -239,6 +239,8 @@ describe('Request management', () => {
 
     await WorkflowDefinition.deleteOne({ _id: workflow._id });
     financeRole.roleType = 'CUSTOM';
+    financeRole.assignmentScope = 'DEPARTMENT';
+    financeRole.assignmentScopes = ['DEPARTMENT'];
     await financeRole.save();
     const initialized = await withTransaction((session) => initializeDefaultApprovalWorkflow({
       session,
@@ -529,6 +531,210 @@ describe('Request management', () => {
       .toBe(String(fallback._id));
   });
 
+  it('resolves a dual-scope workflow role only at its explicitly configured organization scope', async () => {
+    const context = await setup('dual-scope-workflow-resolution');
+    const purchaseType = await createPurchaseType(context.adminToken, {
+      code: 'PURCHASE-DUAL-SCOPE-WORKFLOW',
+    });
+    const role = await Role.create({
+      organizationId: context.organizationId,
+      name: 'Dual Scope Workflow Approver',
+      roleType: 'CUSTOM',
+      rolePurpose: 'FINANCE_APPROVER',
+      assignmentScopes: ['ORGANIZATION', 'DEPARTMENT'],
+      permissions: ['requests.approve'],
+      status: 'ACTIVE',
+      createdBy: context.admin._id,
+    });
+    await UserRoleAssignment.create([
+      {
+        userId: context.admin._id,
+        roleId: role._id,
+        organizationId: context.organizationId,
+        departmentId: null,
+        scopeType: 'ORGANIZATION',
+        status: 'ACTIVE',
+        assignedBy: context.admin._id,
+      },
+      {
+        userId: context.financeApprover._id,
+        roleId: role._id,
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        scopeType: 'DEPARTMENT',
+        status: 'ACTIVE',
+        assignedBy: context.admin._id,
+      },
+    ]);
+    const workflow = await request(app)
+      .post('/api/approval-workflows')
+      .set(authHeader(context.adminToken))
+      .send({
+        name: 'Organization Scope Approval',
+        description: '',
+        requestTypeId: purchaseType.body.data.id,
+        isDefault: false,
+        priority: 10,
+        selectionCondition: null,
+        stages: [
+          {
+            stageId: 'department-manager-approval',
+            sequence: 1,
+            name: 'Department Manager Approval',
+            description: '',
+            approverType: 'DEPARTMENT_MANAGER',
+            assignment: { type: 'DEPARTMENT_MANAGER', resolution: 'CLAIM_ONE' },
+            approvalMode: 'ANY',
+            isMandatory: true,
+            isConfigurable: false,
+            condition: null,
+          },
+          {
+            stageId: 'dual-scope-approval',
+            sequence: 2,
+            name: 'Organization Role Approval',
+            description: '',
+            approverType: 'ROLE',
+            assignment: {
+              type: 'ROLE',
+              roleId: String(role._id),
+              resolution: 'CLAIM_ONE',
+              scopeType: 'ORGANIZATION',
+            },
+            roleId: String(role._id),
+            approvalMode: 'ANY',
+            isMandatory: true,
+            isConfigurable: true,
+            condition: null,
+          },
+        ],
+      });
+    expect(workflow.status, JSON.stringify(workflow.body)).toBe(201);
+
+    const created = await request(app)
+      .post('/api/requests')
+      .set(authHeader(context.memberToken))
+      .send({
+        departmentId: String(context.department._id),
+        requestTypeId: purchaseType.body.data.id,
+        title: 'Explicit organization-scope approval',
+        details: {
+          itemName: 'Test item',
+          quantity: 1,
+          estimatedCost: 80000,
+          justification: 'Verify exact approval scope.',
+        },
+      });
+    expect(created.status).toBe(201);
+    const submitted = await request(app)
+      .post(`/api/requests/${created.body.data.id}/submit`)
+      .set(authHeader(context.memberToken))
+      .send({});
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
+    const roleSteps = await ApprovalStep.find({
+      requestId: created.body.data.id,
+      stageId: 'dual-scope-approval',
+      attemptNumber: 1,
+    }).lean();
+    expect(roleSteps).toHaveLength(1);
+    expect(roleSteps[0]).toMatchObject({
+      scopeType: 'ORGANIZATION',
+      approverId: context.admin._id,
+    });
+  });
+
+  it('keeps requests in draft and audits a role stage with no eligible approver', async () => {
+    const context = await setup('approval-resolution-failure');
+    const purchaseType = await createPurchaseType(context.adminToken, {
+      code: 'PURCHASE-NO-ROLE-APPROVER',
+    });
+    const role = await Role.create({
+      organizationId: context.organizationId,
+      name: 'Unassigned Department Approver',
+      roleType: 'CUSTOM',
+      assignmentScopes: ['DEPARTMENT'],
+      permissions: ['requests.approve'],
+      status: 'ACTIVE',
+      createdBy: context.admin._id,
+    });
+    const workflow = await request(app)
+      .post('/api/approval-workflows')
+      .set(authHeader(context.adminToken))
+      .send({
+        name: 'Workflow Without Eligible Approver',
+        description: '',
+        requestTypeId: purchaseType.body.data.id,
+        isDefault: false,
+        priority: 20,
+        selectionCondition: null,
+        stages: [
+          {
+            stageId: 'department-manager-approval',
+            sequence: 1,
+            name: 'Department Manager Approval',
+            description: '',
+            approverType: 'DEPARTMENT_MANAGER',
+            assignment: { type: 'DEPARTMENT_MANAGER', resolution: 'CLAIM_ONE' },
+            approvalMode: 'ANY',
+            isMandatory: true,
+            isConfigurable: false,
+            condition: null,
+          },
+          {
+            stageId: 'unassigned-role-approval',
+            sequence: 2,
+            name: 'Unassigned Role Approval',
+            description: '',
+            approverType: 'ROLE',
+            assignment: {
+              type: 'ROLE',
+              roleId: String(role._id),
+              resolution: 'CLAIM_ONE',
+              scopeType: 'DEPARTMENT',
+            },
+            roleId: String(role._id),
+            approvalMode: 'ANY',
+            isMandatory: true,
+            isConfigurable: true,
+            condition: null,
+          },
+        ],
+      });
+    expect(workflow.status, JSON.stringify(workflow.body)).toBe(201);
+    const created = await request(app)
+      .post('/api/requests')
+      .set(authHeader(context.memberToken))
+      .send({
+        departmentId: String(context.department._id),
+        requestTypeId: purchaseType.body.data.id,
+        title: 'No eligible approver test',
+        details: {
+          itemName: 'Test item',
+          quantity: 1,
+          estimatedCost: 80000,
+          justification: 'Verify failure handling.',
+        },
+      });
+    expect(created.status).toBe(201);
+    const submitted = await request(app)
+      .post(`/api/requests/${created.body.data.id}/submit`)
+      .set(authHeader(context.memberToken))
+      .send({});
+    expect(submitted.status).toBe(409);
+    expect(submitted.body.code).toBe('NO_ELIGIBLE_APPROVER');
+    expect((await Request.findById(created.body.data.id)).status).toBe('DRAFT');
+    const audit = await AuditLog.findOne({
+      resourceType: 'Request',
+      resourceId: created.body.data.id,
+      action: 'APPROVAL_RESOLUTION_FAILED',
+    }).lean();
+    expect(audit.changes).toMatchObject({
+      code: 'NO_ELIGIBLE_APPROVER',
+      stageId: 'unassigned-role-approval',
+      scopeType: 'DEPARTMENT',
+    });
+  });
+
   it('exposes an active Finance approval to every assigned finance approver and permits the claimant to act', async () => {
     const context = await setup('multiple-finance-approvers');
     const secondFinanceApprover = await createUser({
@@ -549,6 +755,7 @@ describe('Request management', () => {
       name: 'Custom Finance Approver',
       roleType: 'CUSTOM',
       rolePurpose: 'FINANCE_APPROVER',
+      assignmentScope: 'DEPARTMENT',
       permissions: ['requests.approve'],
       status: 'ACTIVE',
       createdBy: context.admin._id,
@@ -1830,6 +2037,7 @@ describe('Request management', () => {
       organizationId: context.organizationId,
       name: 'Department Request Viewer',
       roleType: 'CUSTOM',
+      assignmentScope: 'DEPARTMENT',
       permissions: ['requests.view'],
       status: 'ACTIVE',
       createdBy: context.admin._id,
@@ -2275,6 +2483,7 @@ describe('Request management', () => {
       organizationId: context.organizationId,
       name: 'Scoped Approval Delegate',
       roleType: 'CUSTOM',
+      assignmentScope: 'DEPARTMENT',
       permissions: ['requests.approve'],
       status: 'ACTIVE',
       createdBy: context.admin._id,

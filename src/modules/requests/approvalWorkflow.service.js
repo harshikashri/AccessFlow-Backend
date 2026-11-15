@@ -8,6 +8,7 @@ import { AppError } from '../../utils/AppError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { WORKFLOW_ACTIONS } from './request.constants.js';
 import { validateWorkflowCondition } from './approvalWorkflow.validation.js';
+import { getSupportedRoleScopes } from '../roles/role.scope.js';
 
 const FINANCE_APPROVER_ROLE_NAME = 'Finance Approver';
 const DEFAULT_FINANCE_CONDITION = { field: 'amount', operator: 'GREATER_THAN', value: 50000 };
@@ -82,10 +83,22 @@ const validateReferences = async ({
       if (!role.permissions?.includes('requests.approve')) {
         throw new AppError('Approval roles must include the requests.approve permission.', 400, 'APPROVAL_PERMISSION_REQUIRED');
       }
-      const isFinanceApprover =
-        role.roleType === 'FINANCE_APPROVER' || role.rolePurpose === 'FINANCE_APPROVER';
-      if (isFinanceApprover && stage.assignment.scopeType !== 'DEPARTMENT') {
-        throw new AppError('Finance Approver stages must use the request department scope.', 400, 'FINANCE_APPROVAL_SCOPE_REQUIRED');
+      const supportedScopes = getSupportedRoleScopes(role);
+      if (!supportedScopes.length) {
+        throw new AppError(
+          `Role "${role.name}" has no configured assignment scope. Configure its supported scopes before using it in a workflow.`,
+          409,
+          'ROLE_ASSIGNMENT_SCOPE_UNCONFIGURED',
+          { roleId: String(role._id) }
+        );
+      }
+      if (!supportedScopes.includes(stage.assignment.scopeType)) {
+        throw new AppError(
+          `Role "${role.name}" does not support the ${stage.assignment.scopeType} scope selected for this workflow stage.`,
+          400,
+          'ROLE_APPROVAL_SCOPE_UNSUPPORTED',
+          { roleId: String(role._id), supportedScopes, requestedScope: stage.assignment.scopeType }
+        );
       }
     }
     if (stage.assignment.type === 'USER') {

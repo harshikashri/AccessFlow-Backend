@@ -186,9 +186,6 @@ const resolveApprovers = async ({ organizationId, request, stage, session }) => 
     const isFinanceApprover =
       role.roleType === 'FINANCE_APPROVER' || role.rolePurpose === 'FINANCE_APPROVER';
     const scopeType = assignment.scopeType || (isFinanceApprover ? 'DEPARTMENT' : null);
-    if (isFinanceApprover && scopeType !== 'DEPARTMENT') {
-      throw new AppError('Finance Approvers must be assigned within the request department.', 409, 'FINANCE_APPROVAL_SCOPE_REQUIRED');
-    }
     if (scopeType === 'DEPARTMENT') {
       const department = await Department.findOne({
         _id: request.departmentId,
@@ -258,12 +255,27 @@ export const createRuntimeApprovals = async ({
         workflowDefinitionId: workflow._id, workflowVersion: workflow.version,
         stageId: stage.stageId, sequence: stage.sequence, stageName: stage.name,
         approverType: stage.approverType, assignmentResolution: stage.assignment?.resolution || 'DIRECT',
+        scopeType: stage.assignment?.scopeType || null,
         approvalMode: stage.approvalMode, status: 'SKIPPED',
       });
       continue;
     }
     const approvers = await resolveApprovers({ organizationId, request, stage, session });
-    if (!approvers.length) throw new AppError(`No eligible approver is available for ${stage.name}.`, 409, 'NO_ELIGIBLE_APPROVER');
+    if (!approvers.length) {
+      throw new AppError(
+        `No eligible approver is available for ${stage.name}.`,
+        409,
+        'NO_ELIGIBLE_APPROVER',
+        {
+          workflowDefinitionId: String(workflow._id),
+          workflowVersion: workflow.version,
+          stageId: stage.stageId,
+          stageName: stage.name,
+          roleId: stage.assignment?.roleId ? String(stage.assignment.roleId) : null,
+          scopeType: stage.assignment?.scopeType || null,
+        },
+      );
+    }
     const stageStartedAt = firstApplicable ? new Date() : null;
     const stageDuration = stageStartedAt && stage.sla ? durationMs(stage.sla) : null;
     const firstReminderAt = stageStartedAt && stage.sla?.reminders?.[0]
@@ -280,6 +292,12 @@ export const createRuntimeApprovals = async ({
         approverType: stage.approverType, approverId,
         roleId: stage.assignment?.roleId || stage.roleId || null,
         assignmentResolution: stage.assignment?.resolution || 'DIRECT',
+        scopeType: stage.assignment?.scopeType ||
+          (stage.approverType === 'DEPARTMENT_MANAGER'
+            ? 'DEPARTMENT'
+            : stage.approverType === 'ORGANIZATION_ADMIN'
+              ? 'ORGANIZATION'
+              : null),
         approvalMode: stage.approvalMode,
         ...(stageDuration
           ? {
@@ -363,10 +381,16 @@ const getActionContext = async ({ organizationId, approvalStepId, actorId, acces
   if (!workflowStage) {
     throw new AppError('The approval stage configuration is unavailable.', 409, 'WORKFLOW_NOT_FOUND');
   }
+  const stageForEligibility = step.scopeType
+    ? {
+        ...workflowStage.toObject?.() || workflowStage,
+        assignment: { ...workflowStage.assignment, scopeType: step.scopeType },
+      }
+    : workflowStage;
   const eligibleApprovers = await resolveApprovers({
     organizationId,
     request,
-    stage: workflowStage,
+    stage: stageForEligibility,
     session,
   });
   if (!eligibleApprovers.some((id) => String(id) === String(step.approverId))) {
@@ -701,6 +725,7 @@ export const reconcileCurrentRoleApproverStep = async ({ organizationId, actorId
         approverId: actorId,
         roleId: step.roleId,
         assignmentResolution: step.assignmentResolution,
+        scopeType: step.scopeType,
         approvalMode: step.approvalMode,
         status: 'ACTIVE',
         slaStartedAt: step.slaStartedAt,

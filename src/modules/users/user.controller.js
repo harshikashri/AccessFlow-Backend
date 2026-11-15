@@ -1,12 +1,15 @@
 import { AppError } from '../../utils/AppError.js';
 import * as userService from './user.service.js';
 import {
+	validateBulkUserIds,
+	validateBulkMembershipStatus,
 	validateCreateUser,
 	validateDepartmentAssignment,
 	validateUserId,
 	validateUserListQuery,
 	validateUpdateUser,
 } from './user.validation.js';
+import * as bulkUserService from './bulk-user.service.js';
 
 export const createUser = async (req, res) => {
 	const input = validateCreateUser(req.body);
@@ -112,6 +115,100 @@ export const initiatePasswordReset = async (req, res) => {
 	});
 };
 
+export const downloadBulkImportTemplate = async (req, res) => {
+	const csv = bulkUserService.getBulkUserImportTemplate();
+	return res
+		.status(200)
+		.type('text/csv')
+		.set('Content-Disposition', 'attachment; filename="accessflow-users-template.csv"')
+		.send(csv);
+};
+
+export const validateBulkImport = async (req, res) => {
+	const result = await bulkUserService.validateBulkUserImport({
+		organizationId: req.auth.organizationId,
+		access: req.userAccess,
+		csv: req.bulkUserCsv,
+	});
+	return res.status(200).json({
+		success: true,
+		message: 'Bulk import validation completed.',
+		data: {
+			limits: bulkUserService.bulkImportLimits(),
+			summary: result.summary,
+			rows: result.rows.map((row) => ({
+				rowNumber: row.rowNumber,
+				firstName: row.firstName,
+				lastName: row.lastName,
+				email: row.email,
+				department: row.department,
+				role: row.role,
+				scopeType: row.scopeType || null,
+				status: row.status,
+				errors: row.errors,
+			})),
+		},
+	});
+};
+
+export const confirmBulkImport = async (req, res) => {
+	const result = await bulkUserService.confirmBulkUserImport({
+		organizationId: req.auth.organizationId,
+		actorId: req.auth.userId,
+		access: req.userAccess,
+		csv: req.bulkUserCsv,
+	});
+	return res.status(200).json({
+		success: true,
+		message: 'Bulk import completed.',
+		data: result,
+	});
+};
+
+export const downloadBulkImportFailedReport = async (req, res) => {
+	const report = await bulkUserService.getBulkUserFailedReport({
+		organizationId: req.auth.organizationId,
+		access: req.userAccess,
+		csv: req.bulkUserCsv,
+	});
+	return res
+		.status(200)
+		.type(report.contentType)
+		.set('Content-Disposition', `attachment; filename="${report.filename}"`)
+		.send(report.csv);
+};
+
+export const bulkDeactivateUsers = async (req, res) => {
+	const { userIds } = validateBulkUserIds(req.body);
+	const result = await bulkUserService.bulkDeactivateUsers({
+		userIds,
+		organizationId: req.auth.organizationId,
+		actorId: req.auth.userId,
+		access: req.userAccess,
+	});
+	return res.status(200).json({
+		success: true,
+		message: 'Bulk user deactivation completed.',
+		data: result,
+	});
+};
+
+export const bulkSetMembershipStatus = async (req, res) => {
+	const { userIds, status } = validateBulkMembershipStatus(req.body);
+	const result = await bulkUserService.bulkSetMembershipStatus({
+		userIds,
+		status,
+		organizationId: req.auth.organizationId,
+		actorId: req.auth.userId,
+		access: req.userAccess,
+	});
+	return res.status(200).json({
+		success: true,
+		message: 'Membership status changes processed.',
+		data: result,
+	});
+};
+
 export default {
 	createUser,
 	listUsers,
@@ -121,4 +218,10 @@ export default {
 	activateUser,
 	deactivateUser,
 	initiatePasswordReset,
+	downloadBulkImportTemplate,
+	validateBulkImport,
+	confirmBulkImport,
+	downloadBulkImportFailedReport,
+	bulkDeactivateUsers,
+	bulkSetMembershipStatus,
 };

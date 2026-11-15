@@ -43,6 +43,34 @@ const validateDescription = (value) => {
 	return description;
 };
 
+const validateRoleAssignmentScopes = (value) => {
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new AppError(
+			'assignmentScopes must include ORGANIZATION, DEPARTMENT, or both.',
+			400,
+			value === undefined ? 'ROLE_ASSIGNMENT_SCOPE_REQUIRED' : 'INVALID_ASSIGNMENT_SCOPES'
+		);
+	}
+	if (value.some((scope) => !SCOPE_TYPES.includes(scope)) || new Set(value).size !== value.length) {
+		throw new AppError('assignmentScopes must contain unique ORGANIZATION or DEPARTMENT values.', 400, 'INVALID_ASSIGNMENT_SCOPES');
+	}
+	return SCOPE_TYPES.filter((scope) => value.includes(scope));
+};
+
+const readAssignmentScopes = (body, required = false) => {
+	if (Object.hasOwn(body, 'assignmentScopes') && Object.hasOwn(body, 'assignmentScope')) {
+		throw new AppError('Use assignmentScopes instead of sending both scope fields.', 400, 'INVALID_ASSIGNMENT_SCOPES');
+	}
+	if (Object.hasOwn(body, 'assignmentScopes')) return validateRoleAssignmentScopes(body.assignmentScopes);
+	if (Object.hasOwn(body, 'assignmentScope')) {
+		return validateRoleAssignmentScopes([body.assignmentScope]);
+	}
+	if (required) {
+		return validateRoleAssignmentScopes(undefined);
+	}
+	return undefined;
+};
+
 export const validatePermissions = (value) => {
 	if (!Array.isArray(value)) fail('permissions must be an array.');
 	const unknown = value.filter((permission) => typeof permission !== 'string' || !PERMISSION_CATALOG.includes(permission));
@@ -57,16 +85,19 @@ export const validatePermissions = (value) => {
 
 export const validateCreateRole = (body) => {
 	requireObject(body);
-	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'permissions', 'roleType', 'rolePurpose'].includes(key));
+	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'permissions', 'roleType', 'rolePurpose', 'assignmentScope', 'assignmentScopes'].includes(key));
 	if (unknown.length) throw new AppError('Unsupported role fields.', 400, 'VALIDATION_ERROR', unknown);
 	const roleType = body.roleType === undefined ? 'CUSTOM' : body.roleType;
 	if (!CREATABLE_ROLE_TYPES.includes(roleType)) fail('Built-in roles are provisioned with the organization and cannot be created through this API.');
+	const rolePurpose = validateRolePurpose(body.rolePurpose);
+	const assignmentScopes = readAssignmentScopes(body, true);
 	return {
 		name: validateName(body.name),
 		description: body.description === undefined ? '' : validateDescription(body.description),
 		permissions: validatePermissions(body.permissions),
 		roleType,
-		rolePurpose: validateRolePurpose(body.rolePurpose),
+		rolePurpose,
+		assignmentScopes,
 	};
 };
 
@@ -80,13 +111,15 @@ const validateRolePurpose = (value) => {
 
 export const validateUpdateRole = (body) => {
 	requireObject(body);
-	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'rolePurpose'].includes(key));
+	const unknown = Object.keys(body).filter((key) => !['name', 'description', 'rolePurpose', 'assignmentScope', 'assignmentScopes'].includes(key));
 	if (unknown.length) throw new AppError('Unsupported role update fields.', 400, 'VALIDATION_ERROR', unknown);
 	if (Object.keys(body).length === 0) fail('At least one role field must be provided.');
 	const input = {};
 	if (Object.hasOwn(body, 'name')) input.name = validateName(body.name);
 	if (Object.hasOwn(body, 'description')) input.description = validateDescription(body.description);
 	if (Object.hasOwn(body, 'rolePurpose')) input.rolePurpose = validateRolePurpose(body.rolePurpose);
+	const assignmentScopes = readAssignmentScopes(body);
+	if (assignmentScopes !== undefined) input.assignmentScopes = assignmentScopes;
 	return input;
 };
 

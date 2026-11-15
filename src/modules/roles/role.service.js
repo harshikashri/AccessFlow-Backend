@@ -5,11 +5,14 @@ import Organization from '../../models/Organization.js';
 import Department from '../../models/Department.js';
 import UserRoleAssignment from '../../models/UserRoleAssignment.js';
 import AuditLog from '../../models/AuditLog.js';
+import ApprovalStep from '../../models/ApprovalStep.js';
+import WorkflowDefinition from '../../models/WorkflowDefinition.js';
 import { ORGANIZATION_ADMIN_ROLE_NAME, PERMISSION_MODULES } from '../../config/constants.js';
 import { AppError } from '../../utils/AppError.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { BUILT_IN_ROLE_TYPES, REQUIRED_ADMIN_PERMISSIONS, ROLE_ACTIONS } from './role.constants.js';
 import { getRoleType } from './role-compatibility.js';
+import { getSupportedRoleScopes } from './role.scope.js';
 import { persistRoleAssignments, prepareRoleAssignments } from './role.assignment.service.js';
 import { escapeRegex, normalizeRoleName, toPublicAssignment, toPublicRole } from './role.utils.js';
 
@@ -134,6 +137,74 @@ const getAssignmentForAdmin = async ({ roleId, userId, organizationId, scopeType
 	return query;
 };
 
+const assertRoleScopesCanBeRemoved = async ({ roleId, organizationId, removedScopes, session }) => {
+	if (!removedScopes.length) return;
+	const assignmentQuery = UserRoleAssignment.exists({
+		roleId,
+		organizationId,
+		status: 'ACTIVE',
+		scopeType: { $in: removedScopes },
+	});
+	if (session) assignmentQuery.session(session);
+	if (await assignmentQuery) {
+		throw new AppError(
+			`Cannot remove ${removedScopes.join(' and ')} support while active assignments still use that scope. Migrate or remove those assignments first; assignment history will be preserved.`,
+			409,
+			'ROLE_SCOPE_ASSIGNMENTS_CONFLICT',
+			{ removedScopes }
+		);
+	}
+
+	let workflowQuery = WorkflowDefinition.find({
+		organizationId,
+		definitionType: 'APPROVAL_WORKFLOW',
+		isActive: true,
+	}).select('name stages');
+	if (session) workflowQuery = workflowQuery.session(session);
+	const workflows = await workflowQuery;
+	const incompatibleStages = workflows.flatMap((workflow) =>
+		(workflow.stages || [])
+			.filter((stage) =>
+				stage.assignment?.type === 'ROLE' &&
+				String(stage.assignment.roleId || stage.roleId) === String(roleId) &&
+				(
+					!stage.assignment.scopeType ||
+					stage.assignment.scopeType === 'ORGANIZATION_OR_DEPARTMENT' ||
+					removedScopes.includes(stage.assignment.scopeType)
+				)
+			)
+			.map((stage) => `${workflow.name}: ${stage.name}`),
+	);
+	if (incompatibleStages.length) {
+		throw new AppError(
+			`Cannot remove scope support used by active workflow stages: ${incompatibleStages.join('; ')}. Update those workflows to an exact supported scope first.`,
+			409,
+			'ROLE_SCOPE_WORKFLOW_CONFLICT',
+			{ stages: incompatibleStages }
+		);
+	}
+
+	let approvalsQuery = ApprovalStep.find({
+		organizationId,
+		roleId,
+		status: { $in: ['PENDING', 'ACTIVE', 'CLAIMED'] },
+	}).select('scopeType');
+	if (session) approvalsQuery = approvalsQuery.session(session);
+	const pendingApprovals = await approvalsQuery;
+	if (pendingApprovals.some((step) =>
+		!step.scopeType ||
+		step.scopeType === 'ORGANIZATION_OR_DEPARTMENT' ||
+		removedScopes.includes(step.scopeType)
+	)) {
+		throw new AppError(
+			'Cannot remove scope support while pending approvals still depend on that scope. Complete or resolve those approvals first.',
+			409,
+			'ROLE_SCOPE_APPROVAL_CONFLICT',
+			{ removedScopes }
+		);
+	}
+};
+
 export const getPermissionCatalog = () => PERMISSION_MODULES;
 
 export const createRole = async ({ organizationId, actorId, input }) => {
@@ -148,6 +219,8 @@ export const createRole = async ({ organizationId, actorId, input }) => {
 				description: input.description,
 				roleType: input.roleType || 'CUSTOM',
 				rolePurpose: input.rolePurpose || 'GENERAL',
+				assignmentScope: input.assignmentScopes.length === 1 ? input.assignmentScopes[0] : null,
+				assignmentScopes: input.assignmentScopes,
 				permissions: input.permissions,
 				status: 'ACTIVE',
 				createdBy: actorId,
@@ -158,7 +231,16 @@ export const createRole = async ({ organizationId, actorId, input }) => {
 				actorId,
 				action: ROLE_ACTIONS.CREATED,
 				resourceId: role._id,
-				changes: { name: role.name, description: role.description, roleType: role.roleType, rolePurpose: role.rolePurpose, permissions: role.permissions, status: role.status },
+				changes: {
+					name: role.name,
+					description: role.description,
+					roleType: role.roleType,
+					rolePurpose: role.rolePurpose,
+					assignmentScope: role.assignmentScope,
+					assignmentScopes: role.assignmentScopes,
+					permissions: role.permissions,
+					status: role.status,
+				},
 			});
 			return toPublicRole(role);
 		});
@@ -210,14 +292,33 @@ export const updateRole = async ({ roleId, organizationId, actorId, input }) => 
 			if (Object.hasOwn(input, 'rolePurpose') && isBuiltInRole(role)) {
 				throw new AppError('Role purpose can only be changed for custom roles.', 409, 'BUILT_IN_ROLE_PROTECTED');
 			}
+			if (Object.hasOwn(input, 'assignmentScopes') && isBuiltInRole(role)) {
+				throw new AppError('Built-in role assignment scope is determined by its role type and cannot be changed.', 409, 'BUILT_IN_ROLE_PROTECTED');
+			}
 			if (isBuiltInRole(role) && Object.hasOwn(input, 'name')) {
 				throw new AppError('Built-in roles cannot be renamed.', 409, 'BUILT_IN_ROLE_PROTECTED');
+			}
+			const changes = {};
+			if (Object.hasOwn(input, 'assignmentScopes')) {
+				const currentScopes = getSupportedRoleScopes(role);
+				const nextScopes = input.assignmentScopes;
+				await assertRoleScopesCanBeRemoved({
+					roleId: role._id,
+					organizationId,
+					removedScopes: currentScopes.filter((scope) => !nextScopes.includes(scope)),
+					session,
+				});
+				if (JSON.stringify(currentScopes) !== JSON.stringify(nextScopes)) {
+					changes.assignmentScopes = { from: currentScopes, to: nextScopes };
+					role.assignmentScopes = nextScopes;
+					role.assignmentScope = nextScopes.length === 1 ? nextScopes[0] : null;
+				}
 			}
 			if (Object.hasOwn(input, 'name') && input.name.toLowerCase() !== role.name.toLowerCase()) {
 				await ensureRoleNameAvailable({ organizationId, name: input.name, exceptRoleId: role._id, session });
 			}
-			const changes = {};
 			for (const [field, value] of Object.entries(input)) {
+				if (field === 'assignmentScopes') continue;
 				if (role[field] !== value) {
 					changes[field] = { from: role[field], to: value };
 					role[field] = value;
@@ -327,7 +428,7 @@ export const assignRole = async ({ roleId, organizationId, actorId, access, inpu
 				departmentId: input.departmentId ? String(input.departmentId) : null,
 			},
 		});
-		return toPublicAssignment(assignment);
+		return toPublicAssignment({ ...assignment.toObject(), roleId: role });
 	});
 
 export const removeRoleAssignment = async ({ roleId, userId, organizationId, actorId, scope }) =>
@@ -384,11 +485,18 @@ export const updateRoleAssignment = async ({ assignmentId, organizationId, actor
 			scopeType: assignment.scopeType,
 			departmentId: assignment.departmentId ? String(assignment.departmentId) : null,
 		};
+		const [prepared] = await prepareRoleAssignments({
+			assignments: [{ ...scope, roleId: role._id }],
+			organizationId,
+			access,
+			session,
+			userId: assignment.userId,
+		});
 		if (
 			currentScope.scopeType === scope.scopeType &&
 			currentScope.departmentId === (scope.departmentId || null)
 		) {
-			return toPublicAssignment(assignment);
+			return toPublicAssignment({ ...assignment.toObject(), roleId: role });
 		}
 
 		const duplicate = await UserRoleAssignment.findOne({
@@ -404,13 +512,6 @@ export const updateRoleAssignment = async ({ assignmentId, organizationId, actor
 			throw new AppError('This role is already assigned at the requested scope.', 409, 'ROLE_ASSIGNMENT_EXISTS');
 		}
 
-		const [prepared] = await prepareRoleAssignments({
-			assignments: [{ ...scope, roleId: role._id }],
-			organizationId,
-			access,
-			session,
-			userId: assignment.userId,
-		});
 		assignment.scopeType = prepared.scopeType;
 		assignment.departmentId = prepared.departmentId;
 		await assignment.save({ session });
@@ -425,7 +526,7 @@ export const updateRoleAssignment = async ({ assignmentId, organizationId, actor
 				scope: { from: currentScope, to: { scopeType: assignment.scopeType, departmentId: assignment.departmentId ? String(assignment.departmentId) : null } },
 			},
 		});
-		return toPublicAssignment(assignment);
+		return toPublicAssignment({ ...assignment.toObject(), roleId: role });
 	});
 
 export const listUserRoleAssignments = async ({ userId, organizationId, page, limit }) => {
@@ -441,7 +542,7 @@ export const listUserRoleAssignments = async ({ userId, organizationId, page, li
 			.sort({ assignedAt: -1, _id: 1 })
 			.skip((page - 1) * limit)
 			.limit(limit)
-			.populate({ path: 'roleId', select: 'name roleType permissions status' })
+			.populate({ path: 'roleId', select: 'name roleType rolePurpose assignmentScope assignmentScopes permissions status' })
 			.populate({ path: 'departmentId', select: 'name status' })
 			.lean(),
 		UserRoleAssignment.countDocuments(filter),
@@ -462,7 +563,7 @@ export const listRoleUsers = async ({ roleId, organizationId, page, limit }) => 
 			.skip((page - 1) * limit)
 			.limit(limit)
 			.populate({ path: 'userId', select: 'name email accountStatus' })
-			.populate({ path: 'roleId', select: 'name roleType status' })
+			.populate({ path: 'roleId', select: 'name roleType rolePurpose assignmentScope assignmentScopes status' })
 			.populate({ path: 'departmentId', select: 'name status' })
 			.lean(),
 		UserRoleAssignment.countDocuments(filter),

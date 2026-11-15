@@ -6,6 +6,7 @@ import UserRoleAssignment from '../../models/UserRoleAssignment.js';
 import { AppError } from '../../utils/AppError.js';
 import { getScopedDepartmentIds } from '../users/user.utils.js';
 import { assertRoleCompatibility, getRoleType } from './role-compatibility.js';
+import { getSupportedRoleScopes } from './role.scope.js';
 
 const assertCanAssignRole = (role, requestedAssignment, access) => {
   if (!access) return;
@@ -41,21 +42,27 @@ const assertCanAssignRole = (role, requestedAssignment, access) => {
 };
 
 const assertRoleScopeType = (role, scopeType) => {
-  const roleType = getRoleType(role);
-  if (roleType === 'ORGANIZATION_ADMIN' && scopeType !== 'ORGANIZATION') {
-    throw new AppError('Organization Admin roles must be assigned at organization scope.', 400, 'INVALID_ROLE_SCOPE');
+  const supportedScopes = getSupportedRoleScopes(role);
+  if (!supportedScopes.length) {
+    throw new AppError(
+      'This role has no configured assignment scope. Configure its supported scopes before assigning it.',
+      409,
+      'ROLE_ASSIGNMENT_SCOPE_UNCONFIGURED'
+    );
   }
-  if (roleType === 'DEPARTMENT_MANAGER' && scopeType !== 'DEPARTMENT') {
-    throw new AppError('Department Manager roles must be assigned at department scope.', 400, 'INVALID_ROLE_SCOPE');
-  }
-  if (role.rolePurpose === 'FINANCE_APPROVER' && scopeType !== 'DEPARTMENT') {
-    throw new AppError('Finance Approver roles must be assigned at department scope.', 400, 'INVALID_ROLE_SCOPE');
+  if (!supportedScopes.includes(scopeType)) {
+    throw new AppError(
+      `This role supports ${supportedScopes.join(' and ')} assignments, not ${scopeType}.`,
+      400,
+      'INVALID_ROLE_SCOPE',
+      { supportedScopes }
+    );
   }
 };
 
 const getActiveRoleAssignments = async ({ userId, organizationId, session }) => {
   let query = UserRoleAssignment.find({ userId, organizationId, status: 'ACTIVE' })
-    .populate({ path: 'roleId', select: 'organizationId name roleType status permissions' });
+    .populate({ path: 'roleId', select: 'organizationId name roleType rolePurpose assignmentScope assignmentScopes status permissions' });
   if (session) query = query.session(session);
   return query;
 };

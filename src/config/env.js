@@ -34,6 +34,14 @@ const parsePositiveInt = (value, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+export const parseTrustProxy = (value) => {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || ['false', 'no', 'off', '0'].includes(normalized)) return false;
+  if (['true', 'yes', 'on'].includes(normalized)) return true;
+  if (/^\d+$/.test(normalized)) return Number(normalized);
+  return value.trim();
+};
+
 export const env = {
   PORT: Number(process.env.PORT) || 5000,
   NODE_ENV: process.env.NODE_ENV || 'development',
@@ -48,9 +56,35 @@ export const env = {
   COOKIE_SAME_SITE: (process.env.COOKIE_SAME_SITE || 'lax').toLowerCase(),
   COOKIE_DOMAIN: process.env.COOKIE_DOMAIN?.trim() || undefined,
   COOKIE_PATH: process.env.COOKIE_PATH?.trim() || '/api/auth',
+  TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
   BCRYPT_SALT_ROUNDS: parsePositiveInt(process.env.BCRYPT_SALT_ROUNDS, 12),
+  API_RATE_LIMIT_WINDOW_MS: parsePositiveInt(
+    process.env.API_RATE_LIMIT_WINDOW_MS,
+    15 * 60 * 1000,
+  ),
+  API_RATE_LIMIT_MAX: parsePositiveInt(process.env.API_RATE_LIMIT_MAX, 1000),
   AUTH_RATE_LIMIT_WINDOW_MS: parsePositiveInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000),
   AUTH_RATE_LIMIT_MAX: parsePositiveInt(process.env.AUTH_RATE_LIMIT_MAX, 20),
+  LOGIN_ACCOUNT_RATE_LIMIT_MAX: parsePositiveInt(
+    process.env.LOGIN_ACCOUNT_RATE_LIMIT_MAX,
+    8,
+  ),
+  FORGOT_PASSWORD_ACCOUNT_RATE_LIMIT_MAX: parsePositiveInt(
+    process.env.FORGOT_PASSWORD_ACCOUNT_RATE_LIMIT_MAX,
+    5,
+  ),
+  PASSWORD_RESET_RATE_LIMIT_MAX: parsePositiveInt(
+    process.env.PASSWORD_RESET_RATE_LIMIT_MAX,
+    10,
+  ),
+  SENSITIVE_OPERATION_RATE_LIMIT_MAX: parsePositiveInt(
+    process.env.SENSITIVE_OPERATION_RATE_LIMIT_MAX,
+    30,
+  ),
+  BULK_OPERATION_RATE_LIMIT_MAX: parsePositiveInt(
+    process.env.BULK_OPERATION_RATE_LIMIT_MAX,
+    8,
+  ),
   EMAIL_PROVIDER: process.env.EMAIL_PROVIDER?.trim().toLowerCase() || '',
   RESEND_API_KEY: process.env.RESEND_API_KEY?.trim() || '',
   EMAIL_FROM: process.env.EMAIL_FROM?.trim() || '',

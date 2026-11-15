@@ -87,9 +87,33 @@ See `.env.example`. Important keys:
 | `REFRESH_TOKEN_EXPIRY` | e.g. `7d` |
 | `CLIENT_URL` | Frontend origin for CORS + origin checks |
 | `COOKIE_*` | Refresh cookie settings |
+| `TRUST_PROXY` | Trusted proxy hop count or IP/subnet list; defaults to `false` |
+| `API_RATE_LIMIT_*` | Per-IP limit for all `/api` endpoints |
+| `AUTH_RATE_LIMIT_*` | Per-IP, per-endpoint limit for authentication endpoints |
+| `LOGIN_ACCOUNT_RATE_LIMIT_MAX` | Failed login attempts per IP and normalized email |
+| `FORGOT_PASSWORD_ACCOUNT_RATE_LIMIT_MAX` | Password-reset requests per IP and normalized email |
+| `PASSWORD_RESET_RATE_LIMIT_MAX` | Per-IP set/reset/forgot-password limit |
+| `SENSITIVE_OPERATION_RATE_LIMIT_MAX` | Per-user, per-endpoint limit for sensitive mutations |
+| `BULK_OPERATION_RATE_LIMIT_MAX` | Per-user, per-endpoint limit for bulk user operations |
 | `SUPER_ADMIN_*` | Seed script inputs only |
 
 Do not commit real secrets.
+
+### Rate limiting and proxy configuration
+
+Rate-limited responses return HTTP `429` with the standard rate-limit headers and a JSON
+`RATE_LIMITED` error. Limits are configurable in `.env.example`; auth and operation limits use
+`AUTH_RATE_LIMIT_WINDOW_MS` as their shared window. Login and forgot-password account keys hash the
+normalized email and include the client IP so the raw email is not retained in the limiter key.
+
+The default Express proxy trust setting is disabled. Configure `TRUST_PROXY` only to match the
+known reverse-proxy hop count or trusted proxy addresses; do not enable blanket proxy trust when
+clients can reach the application directly.
+
+The built-in limiter store is in-memory and process-local. Counts reset on restart and are not
+shared between backend instances, so multi-instance production deployments need a shared
+`express-rate-limit` store to enforce cluster-wide limits. No shared-store backend is configured
+by this project.
 
 ---
 
@@ -323,9 +347,66 @@ All tenant endpoints require a Bearer access token with an active organization c
 | `PATCH` | `/api/users/:userId/activate` | Activate organization membership | `users.deactivate` |
 | `PATCH` | `/api/users/:userId/deactivate` | Deactivate organization membership | `users.deactivate` |
 | `POST` | `/api/users/:userId/password-reset` | Send setup/reset instructions | `users.edit` |
+| `GET` | `/api/users/bulk-import/template` | Download the CSV template | Organization-scoped `users.create` |
+| `POST` | `/api/users/bulk-import/validate` | Validate CSV without writes | Organization-scoped `users.create` |
+| `POST` | `/api/users/bulk-import/confirm` | Revalidate and import valid user groups | Organization-scoped `users.create` |
+| `POST` | `/api/users/bulk-import/failed-report` | Download current validation failures as CSV | Organization-scoped `users.create` |
+| `POST` | `/api/users/bulk-deactivate` | Deactivate users with per-user results | Organization-scoped `users.deactivate` |
 | `POST` | `/api/auth/set-password` | Complete initial password setup | Public, one-time token |
 | `POST` | `/api/auth/forgot-password` | Request reset instructions | Public, rate-limited |
 | `POST` | `/api/auth/reset-password` | Complete password reset | Public, one-time token |
+
+### Bulk user operations
+
+The template endpoint downloads UTF-8 CSV with these ordered columns:
+
+```text
+firstName,lastName,email,employeeId,department,role,designation,phone,scope
+```
+
+Upload CSV using `multipart/form-data` field `file` (JSON `{ "csv": "..." }` is also accepted). Uploads are limited to 512 KiB and 500 data rows. The parser accepts UTF-8 with or without a BOM, quoted values, and CRLF/LF. One row represents one role assignment; repeated emails are grouped into one user only when profile fields agree. Existing accounts are skipped without profile or role changes.
+
+The `scope` column is optional for single-scope roles and accepts `ORGANIZATION` or `DEPARTMENT`. If a role supports both scopes, specify one; legacy rows without a scope retain the Department Member role's department-scope default. Organization-scoped rows must leave `department` blank, while department-scoped rows must name an active department. The organization, departments, and roles are resolved only within the authenticated active organization. Unconfigured legacy custom roles are rejected until configured by an authorized role administrator. The built-in Finance Approver remains department-scoped; custom roles with Finance Approver purpose use their configured supported scopes. The current User schema does not persist `employeeId`, `designation`, or `phone`; non-empty values are rejected to prevent silent data loss.
+
+`GET /api/users/bulk-import/template` downloads the documented CSV as `text/csv` with `Content-Disposition: attachment`. Validation and confirmation accept either multipart field `file` or JSON `{ "csv": "<CSV text>" }`. Failed-report uses the same upload shape and downloads generated errors as `text/csv`; it does not persist or retrieve prior import results.
+
+`POST /api/users/bulk-import/validate` makes no writes and returns:
+
+```json
+{
+  "success": true,
+  "message": "Bulk import validation completed.",
+  "data": {
+    "limits": { "maxBytes": 524288, "maxRows": 500 },
+    "summary": {
+      "totalRows": 2,
+      "validUsers": 1,
+      "existingUsers": 0,
+      "invalidUsers": 0,
+      "validAssignments": 2,
+      "invalidRows": 0,
+      "duplicateRows": 0
+    },
+    "rows": [{
+      "rowNumber": 2,
+      "firstName": "Ada",
+      "lastName": "Lovelace",
+      "email": "ada@example.com",
+      "department": "Research",
+      "role": "Department Member",
+      "scopeType": "DEPARTMENT",
+      "status": "VALID",
+      "errors": []
+    }]
+  }
+}
+```
+
+Validation row statuses are `VALID`, `EXISTING`, `DUPLICATE`, or `INVALID`. Confirmation revalidates before creating each valid email group and creates the user, role assignments, and one-time setup invitation through the existing user-creation flow. Existing accounts are skipped without profile or role changes; global email uniqueness prevents duplicate accounts on concurrent confirmations. The JSON success response contains `data.importId`, `data.summary` (`totalRows`, `usersCreated`, `assignmentsCreated`, `existingUsersSkipped`, `invalidUsersSkipped`, `failedUsers`, `failedAssignments`, `invitations: { sent, failed }`), per-row `data.rows`, and `data.errorReport: { filename, contentType, csv }`. `failedAssignments` counts role rows not persisted because creation of a valid user group failed; invalid groups and existing-user skips remain counted separately. Confirmation row statuses include `IMPORTED`, `EXISTING`, `INVALID`, `FAILED`, and `INVITATION_FAILED`; because each CSV row represents one assignment, the response and error CSV retain outcomes per row.
+
+Confirmation writes append-only `BULK_USER_IMPORT_INITIATED` and completion/failure events. Outcomes use `BULK_USER_IMPORT_COMPLETED`, `BULK_USER_IMPORT_COMPLETED_WITH_FAILURES`, or `BULK_USER_IMPORT_FAILED`, correlated by `data.importId`; audit metadata does not contain CSV contents or credentials. Email delivery failures are reported separately and can be retried through the existing user setup action.
+
+`POST /api/users/bulk-deactivate` accepts `{ "userIds": ["USER_OBJECT_ID"] }` with 1–100 unique IDs and returns `{ "success": true, "message": "Bulk user deactivation completed.", "data": { "summary": { "requested": 1, "deactivated": 1, "failed": 0 }, "results": [{ "userId": "USER_OBJECT_ID", "status": "DEACTIVATED", "message": "User deactivated." }] } }`. It requires organization-scoped `users.deactivate`. The existing last-Organization-Admin and self-deactivation safeguards remain in force. Users with pending or claimed approval responsibility or active delegations are blocked; they must be reassigned/revoked through existing workflow controls before deactivation. Successful deactivation preserves history and revokes sessions for that organization membership.
 
 Create request:
 
@@ -432,7 +513,7 @@ An active request-type workflow is selected when its selection condition matches
 
 The default workflow requires Department Manager approval for every request as stage 1, using `CLAIM_ONE`. Eligible managers share one logical stage; after a manager claims it, other candidate steps are non-actionable. Stage history displays the shared claim once. Stage 2 routes to the Finance Approver role only when the request amount is strictly greater than 50,000; Finance Approver assignments and eligibility are department-scoped, so all active approvers assigned in the request's department can see and compete to claim the step. For Purchase Requests, the request amount is derived from the field marked with `semantic: "AMOUNT"` (the built-in field is `estimatedCost`). To safely mark the canonical Purchase Request field in existing organizations, first preview with `npm run migrate:purchase-request-amount-semantic -- --dry-run`, then run `npm run migrate:purchase-request-amount-semantic`; it only updates the required numeric `estimatedCost` field on a request type whose code is `PURCHASE`, and skips ambiguous or customized amount-field definitions. The migration does not alter existing requests.
 
-Organization Admins with `workflows.manage` can create, review, validate, activate/deactivate, and version-update workflows through `/api/approval-workflows`. Conditions support nested AND/OR groups over request-type fields; the mandatory Department Manager stage must be first and cannot be conditional. The organization default is the fallback and cannot be deactivated.
+Organization Admins with `workflows.manage` can create, review, validate, activate/deactivate, and version-update workflows through `/api/approval-workflows`. Conditions support nested AND/OR groups over request-type fields; the mandatory Department Manager stage must be first and cannot be conditional. Role stages require an exact `assignment.scopeType` (`ORGANIZATION` or `DEPARTMENT`) supported by the selected role; multi-scope roles must choose one scope per stage. That scope is snapshotted on generated approval steps and used for eligibility checks. Existing workflow versions and pending approvals retain their stored scope. The organization default is the fallback and cannot be deactivated.
 
 ---
 
@@ -445,7 +526,7 @@ Roles and user assignments are stored in the existing `roles` and `userRoleAssig
 | `POST` | `/api/roles` | Create a custom role | `roles.create` |
 | `GET` | `/api/roles` | Search/list roles | `roles.view` |
 | `GET` | `/api/roles/:roleId` | Get role details and assignment count | `roles.view` |
-| `PATCH` | `/api/roles/:roleId` | Update name/description/role purpose | `roles.edit` |
+| `PATCH` | `/api/roles/:roleId` | Update name/description/role purpose/assignment scope | `roles.edit` |
 | `PATCH` | `/api/roles/:roleId/permissions` | Replace permission set | `roles.edit` |
 | `GET` | `/api/roles/permissions/catalog` | Get centralized permission catalog | `roles.view` |
 | `PATCH` | `/api/roles/:roleId/activate` | Activate a role | `roles.edit` |
@@ -464,13 +545,16 @@ Create role request:
   "description": "Reviews and approves finance requests",
   "roleType": "CUSTOM",
   "rolePurpose": "FINANCE_APPROVER",
+  "assignmentScope": "DEPARTMENT",
   "permissions": ["requests.view", "requests.approve"]
 }
 ```
 
 `roleType` accepts `CUSTOM`, `EMPLOYEE`, or `DEPARTMENT_MANAGER`. The built-in `ORGANIZATION_ADMIN` type is provisioned by Organization Management and cannot be created through this API. When omitted, a new role defaults to `CUSTOM`.
 
-`rolePurpose` is optional metadata for custom roles. It accepts `GENERAL` or `FINANCE_APPROVER` and defaults to `GENERAL`. It does not grant permissions; effective access still comes only from the role's permission set and active assignment. Only custom roles can have their purpose changed.
+Custom roles accept either `assignmentScope` (one scope) or `assignmentScopes` (one or both of `ORGANIZATION` and `DEPARTMENT`) when created or updated; do not send both. `assignmentScope` remains a compatibility alias for single-scope roles and is `null` for multi-scope roles. The supported scopes are stored on the existing Role document; no collection is added. Legacy custom roles remain unconfigured and are not assigned a guessed scope: new assignments, including assignments during user creation or bulk import, are rejected until a role administrator configures supported scopes with `PATCH /api/roles/:roleId`. Built-in role scope rules remain determined by role type. Removing a supported scope is rejected while active assignments, active workflow stages, or pending approvals depend on it. Inactive assignment history is preserved.
+
+`rolePurpose` is optional metadata for custom roles. It accepts `GENERAL` or `FINANCE_APPROVER` and defaults to `GENERAL`. It does not grant permissions or constrain a custom role's supported scopes; effective access still comes only from the role's permission set and active assignment. Only custom roles can have their purpose changed. The built-in Finance Approver remains department-scoped.
 
 Replace permissions with `PATCH /api/roles/:roleId/permissions`:
 
@@ -507,7 +591,7 @@ Change an existing assignment's scope with `PATCH /api/roles/assignments/:assign
 
 Assignments require an active user and membership in the current organization. The role and, for department scope, department must be active and belong to that organization. Duplicate active assignments are rejected. Permission evaluation reloads active roles and assignments from MongoDB for each request; permissions are not embedded in JWTs. Role deactivation, permission edits, and assignment removal therefore affect existing access tokens immediately, while user login remains available when the account and membership are active.
 
-Roles use the optional `roleType` metadata and the `rolePurpose` field on the existing Role document. Roles with `rolePurpose: "FINANCE_APPROVER"` must be assigned at department scope, and Finance Approver workflow stages must also use the request department scope. Compatibility rules reject Employee plus Department Manager, and Employee plus Organization Admin, within one organization. Finance Approver and Report Viewer remain compatible. Department Manager and department-scoped custom roles must use the same department; organization-scoped roles may coexist. The same compatibility validator is used by role assignment and User creation. Existing Organization Admin role documents without `roleType` are recognized by the existing built-in role identifier.
+Roles use the optional `roleType` metadata and the `rolePurpose`, `assignmentScopes`, and legacy `assignmentScope` fields on the existing Role document. Each custom role assignment and role-based workflow stage must use a supported scope; legacy custom roles without configured scopes preserve existing assignments but cannot receive new assignments until configured. The built-in Finance Approver remains department-scoped, while custom roles with Finance Approver purpose follow their configured scopes. Compatibility rules reject Employee plus Department Manager, and Employee plus Organization Admin, within one organization. Finance Approver and Report Viewer remain compatible. Department Manager and department-scoped custom roles must use the same department; organization-scoped roles may coexist. The same compatibility validator is used by role assignment and User creation. Existing Organization Admin role documents without `roleType` are recognized by the existing built-in role identifier.
 
 Deactivating a role preserves the role and assignments but removes its permissions from effective authorization. Reactivation restores permissions only through assignments that remain active. The last active Organization Admin able to manage roles cannot be deactivated, stripped of `roles.view/create/edit`, or unassigned. Role changes and assignment writes are transactional with append-only audit events: `ROLE_CREATED`, `ROLE_UPDATED`, `ROLE_PERMISSIONS_UPDATED`, `ROLE_ACTIVATED`, `ROLE_DEACTIVATED`, `ROLE_ASSIGNED`, `ROLE_ASSIGNMENT_SCOPE_UPDATED`, and `ROLE_UNASSIGNED`.
 

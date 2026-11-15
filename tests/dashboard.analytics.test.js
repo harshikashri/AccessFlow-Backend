@@ -59,6 +59,7 @@ const createContext = async ({
     name: `Dashboard Analytics Role ${suffix}`,
     roleType,
     rolePurpose,
+    assignmentScope: rolePurpose === 'FINANCE_APPROVER' ? 'DEPARTMENT' : null,
     permissions,
     status: 'ACTIVE',
     createdBy: user._id,
@@ -1110,6 +1111,7 @@ describe('Dashboard analytics providers', () => {
   it('does not treat Finance role purpose as an approval permission grant', async () => {
     const context = await createContext({
       permissions: ['dashboard.view'],
+      scope: 'DEPARTMENT',
       rolePurpose: 'FINANCE_APPROVER',
     });
     const response = await getAnalytics(context.token, 'approval-analytics');
@@ -1125,7 +1127,11 @@ describe('Dashboard analytics providers', () => {
     const created = await request(app)
       .post('/api/roles')
       .set(authHeader(context.token))
-      .send({ name: 'Finance reporting role', permissions: ['dashboard.view'] });
+      .send({
+        name: 'Finance reporting role',
+        assignmentScope: 'DEPARTMENT',
+        permissions: ['dashboard.view'],
+      });
     expect(created.status).toBe(201);
     expect(created.body.data.rolePurpose).toBe('GENERAL');
     expect(created.body.data.permissions).toEqual(['dashboard.view']);

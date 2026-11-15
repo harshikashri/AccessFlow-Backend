@@ -27,6 +27,29 @@ export const validateUserId = (value, fieldName = 'userId') => {
 	return new mongoose.Types.ObjectId(value).toString();
 };
 
+export const validateBulkUserIds = (body) => {
+	requireObject(body);
+	const unknownFields = Object.keys(body).filter((field) => field !== 'userIds');
+	if (unknownFields.length) throw new AppError('Only userIds are allowed.', 400, 'VALIDATION_ERROR', unknownFields);
+	if (!Array.isArray(body.userIds) || body.userIds.length < 1 || body.userIds.length > 100) {
+		fail('userIds must contain between 1 and 100 user IDs.');
+	}
+	const userIds = body.userIds.map((userId, index) => validateUserId(userId, `userIds[${index}]`));
+	if (new Set(userIds).size !== userIds.length) fail('Duplicate user IDs are not allowed.');
+	return { userIds };
+};
+
+export const validateBulkMembershipStatus = (body) => {
+	requireObject(body);
+	const unknownFields = Object.keys(body).filter((field) => !['userIds', 'status'].includes(field));
+	if (unknownFields.length) throw new AppError('Only userIds and status are allowed.', 400, 'VALIDATION_ERROR', unknownFields);
+	if (!['ACTIVE', 'INACTIVE'].includes(body.status)) {
+		fail('status must be ACTIVE or INACTIVE.');
+	}
+	const { userIds } = validateBulkUserIds({ userIds: body.userIds });
+	return { userIds, status: body.status };
+};
+
 const validateName = (value) => {
 	if (typeof value !== 'string') fail('Name is required.');
 	const name = value.trim();
@@ -183,6 +206,8 @@ export const validateResetPassword = validateSetPassword;
 
 export default {
 	validateUserId,
+	validateBulkUserIds,
+	validateBulkMembershipStatus,
 	validateCreateUser,
 	validateUpdateUser,
 	validateDepartmentAssignment,
