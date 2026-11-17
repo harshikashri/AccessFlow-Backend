@@ -134,12 +134,13 @@ const filterAuthorizedSteps = ({ steps, userId, access, delegations, now }) =>
       step.stageId,
       now
     );
+    const recordedByUser =
+      String(step.decidedBy) === String(userId) || String(step.returnedBy) === String(userId);
     if (step.actedOnBehalfOf && String(step.actedOnBehalfOf) !== String(userId)) {
-      return delegatedAssignment;
+      return recordedByUser || delegatedAssignment;
     }
     return assignedToUser ||
-      String(step.decidedBy) === String(userId) ||
-      String(step.returnedBy) === String(userId) ||
+      recordedByUser ||
       String(step.claimedBy) === String(userId) ||
       delegatedAssignment;
   });
@@ -209,7 +210,6 @@ export const getApprovalAnalytics = async ({ userId, organizationId, access, dat
     decision: status,
     count: decisionCounts.get(status) || 0,
   }));
-  decisionsByStatus.push({ decision: 'DELEGATED', count: delegatedDecisionCount });
 
   const durations = decisions
     .filter((step) =>
@@ -316,6 +316,7 @@ export const getApprovalAnalytics = async ({ userId, organizationId, access, dat
     },
     performance: {
       completedDecisions: decisions.length,
+      delegatedDecisions: delegatedDecisionCount,
       averageDecisionMinutes: durations.length
         ? rounded(durations.reduce((sum, value) => sum + value, 0) / durations.length)
         : null,

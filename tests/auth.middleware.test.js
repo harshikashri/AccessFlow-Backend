@@ -101,6 +101,8 @@ describe('Authentication middleware', () => {
       platformPermissions: [],
       organizationPermissions: [],
       departmentPermissions: {},
+      roleTypes: [],
+      rolePermissions: [],
     });
   });
 
@@ -139,6 +141,15 @@ describe('Authentication middleware', () => {
       platformPermissions: [],
       organizationPermissions: [...ORGANIZATION_ADMIN_PERMISSIONS].sort(),
       departmentPermissions: {},
+      roleTypes: ['ORGANIZATION_ADMIN'],
+      rolePermissions: [
+        {
+          roleName: ORGANIZATION_ADMIN_ROLE_NAME,
+          roleType: 'ORGANIZATION_ADMIN',
+          scopeType: 'ORGANIZATION',
+          permissions: [...ORGANIZATION_ADMIN_PERMISSIONS].sort(),
+        },
+      ],
     });
   });
 
@@ -263,6 +274,21 @@ describe('Authentication middleware', () => {
         [String(finance._id)]: [...DEPARTMENT_MANAGER_PERMISSIONS].sort(),
         [String(hr._id)]: [...DEPARTMENT_MANAGER_PERMISSIONS].sort(),
       },
+      roleTypes: ['CUSTOM', 'DEPARTMENT_MANAGER'],
+      rolePermissions: [
+        {
+          roleName: 'Department Manager',
+          roleType: 'DEPARTMENT_MANAGER',
+          scopeType: 'DEPARTMENT',
+          permissions: [...DEPARTMENT_MANAGER_PERMISSIONS].sort(),
+        },
+        {
+          roleName: 'Organization Request Viewer',
+          roleType: 'CUSTOM',
+          scopeType: 'ORGANIZATION',
+          permissions: ['requests.view'],
+        },
+      ],
     });
   });
 
@@ -307,6 +333,15 @@ describe('Authentication middleware', () => {
       departmentPermissions: {
         [String(department._id)]: [...DEPARTMENT_MEMBER_PERMISSIONS].sort(),
       },
+      roleTypes: ['EMPLOYEE'],
+      rolePermissions: [
+        {
+          roleName: DEPARTMENT_MEMBER_ROLE_NAME,
+          roleType: 'EMPLOYEE',
+          scopeType: 'DEPARTMENT',
+          permissions: [...DEPARTMENT_MEMBER_PERMISSIONS].sort(),
+        },
+      ],
     });
   });
 

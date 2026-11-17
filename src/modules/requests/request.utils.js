@@ -22,7 +22,7 @@ export const toPublicRequest = (request) => ({
   organizationId: String(request.organizationId),
   requestNumber: request.requestNumber,
   requesterId: String(request.requesterId),
-  departmentId: String(request.departmentId),
+  departmentId: request.departmentId ? String(request.departmentId) : null,
   requestTypeId: request.requestTypeId ? String(request.requestTypeId) : null,
   requestType: request.requestType,
   requestTypeCode: request.requestTypeCode,

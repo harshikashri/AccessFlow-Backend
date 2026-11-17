@@ -1,7 +1,6 @@
 import * as settingsService from './settings.service.js';
 import {
   validateNotificationPreferencesUpdate,
-  validatePasswordChange,
   validatePreferencesUpdate,
   validateProfileUpdate,
   validateSessionId,
@@ -15,5 +14,4 @@ export const getNotificationPreferences = async (req, res) => res.json({ success
 export const updateNotificationPreferences = async (req, res) => res.json({ success: true, data: await settingsService.updateNotificationPreferences({ userId: req.auth.userId, organizationId: req.auth.organizationId, input: validateNotificationPreferencesUpdate(req.body) }) });
 export const listSessions = async (req, res) => res.json({ success: true, data: { items: await settingsService.listSessions({ userId: req.auth.userId, sessionId: req.auth.sessionId }) } });
 export const revokeSession = async (req, res) => res.json({ success: true, data: await settingsService.revokeSession({ userId: req.auth.userId, organizationId: req.auth.organizationId, sessionId: req.auth.sessionId, targetSessionId: validateSessionId(req.params.sessionId) }) });
-export const changePassword = async (req, res) => res.json({ success: true, data: await settingsService.changePassword({ userId: req.auth.userId, organizationId: req.auth.organizationId, sessionId: req.auth.sessionId, ...validatePasswordChange(req.body) }) });
 export const getOrganizationSettings = async (req, res) => res.json({ success: true, data: await settingsService.getOrganizationSettings({ organizationId: req.auth.organizationId }) });

@@ -136,6 +136,7 @@ export const validateApprovalWorkflow = (body) => {
     'name',
     'description',
     'requestTypeId',
+    'workflowScope',
     'isDefault',
     'selectionCondition',
     'priority',
@@ -146,6 +147,10 @@ export const validateApprovalWorkflow = (body) => {
   if (!Array.isArray(body.stages) || body.stages.length === 0) fail('At least one workflow stage is required.');
   if (body.isDefault !== undefined && typeof body.isDefault !== 'boolean') {
     fail('Workflow isDefault must be boolean.');
+  }
+  const workflowScope = body.workflowScope ?? 'DEPARTMENT';
+  if (!['DEPARTMENT', 'ORGANIZATION'].includes(workflowScope)) {
+    fail('Workflow scope must be DEPARTMENT or ORGANIZATION.');
   }
   if (body.selectionCondition !== undefined &&
       body.selectionCondition !== null &&
@@ -178,6 +183,11 @@ export const validateApprovalWorkflow = (body) => {
     const timing = validateStageTiming(stage);
     if (stage.condition !== undefined && stage.condition !== null &&
       (!stage.condition || typeof stage.condition !== 'object')) fail('Stage condition must be an object.');
+    if (workflowScope === 'ORGANIZATION' &&
+        assignment.type === 'ROLE' &&
+        assignment.scopeType !== 'ORGANIZATION') {
+      fail('Organization-level workflows require organization-scoped approval roles.');
+    }
     if (assignment.type === 'DEPARTMENT_MANAGER' &&
       (stage.condition || stage.isConfigurable === true)) {
       fail('The mandatory Department Manager stage cannot be conditional or configurable.');
@@ -199,14 +209,18 @@ export const validateApprovalWorkflow = (body) => {
   });
 
   const managerStages = stages.filter((stage) => stage.approverType === 'DEPARTMENT_MANAGER');
-  if (managerStages.length !== 1 || !managerStages[0].isMandatory) {
-    fail('Exactly one mandatory Department Manager stage is required.');
-  }
-  if (managerStages[0].sequence !== 1) {
-    fail('The mandatory Department Manager stage must be first.');
-  }
-  if (managerStages[0].assignment.resolution !== 'CLAIM_ONE' || managerStages[0].approvalMode !== 'ANY') {
-    fail('The mandatory Department Manager stage must use CLAIM_ONE and ANY.');
+  if (workflowScope === 'DEPARTMENT') {
+    if (managerStages.length !== 1 || !managerStages[0].isMandatory) {
+      fail('Exactly one mandatory Department Manager stage is required.');
+    }
+    if (managerStages[0].sequence !== 1) {
+      fail('The mandatory Department Manager stage must be first.');
+    }
+    if (managerStages[0].assignment.resolution !== 'CLAIM_ONE' || managerStages[0].approvalMode !== 'ANY') {
+      fail('The mandatory Department Manager stage must use CLAIM_ONE and ANY.');
+    }
+  } else if (managerStages.length) {
+    fail('Organization-level workflows cannot include Department Manager stages.');
   }
 
   const requestTypeId = body.requestTypeId === undefined || body.requestTypeId === null
@@ -215,6 +229,7 @@ export const validateApprovalWorkflow = (body) => {
   const isDefault = body.isDefault === true ||
     (body.isDefault === undefined && requestTypeId === null);
   if (isDefault && requestTypeId) fail('The organization default workflow cannot target a request type.');
+  if (isDefault && workflowScope !== 'DEPARTMENT') fail('The organization default workflow must be department-scoped.');
   if (isDefault && body.selectionCondition) fail('The organization default workflow cannot have a selection condition.');
   if (!isDefault && !requestTypeId) fail('A request type is required for a conditional workflow.');
 
@@ -222,6 +237,7 @@ export const validateApprovalWorkflow = (body) => {
     name: text(body.name, 'Workflow name', 200),
     description: body.description === undefined ? '' : (body.description === '' ? '' : text(body.description, 'Workflow description', 1000)),
     requestTypeId,
+    workflowScope,
     isDefault,
     ...(body.selectionCondition === undefined ? {} : { selectionCondition: body.selectionCondition }),
     ...(body.priority === undefined ? {} : { priority: body.priority }),

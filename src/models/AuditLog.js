@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import User from './User.js';
 
 const SENSITIVE_KEYS = /password|token|secret|credential|apiKey|accessKey|refresh/i;
 
@@ -30,6 +31,10 @@ const auditLogSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
+    },
+    actorPlatformRole: {
+      type: String,
+      enum: ['SUPER_ADMIN', null],
     },
     action: {
       type: String,
@@ -74,10 +79,20 @@ const auditLogSchema = new mongoose.Schema(
 
 auditLogSchema.index({ organizationId: 1, timestamp: -1 });
 auditLogSchema.index({ actorId: 1, timestamp: -1 });
+auditLogSchema.index({ actorPlatformRole: 1, timestamp: -1 });
 auditLogSchema.index({ resourceType: 1, resourceId: 1, timestamp: -1 });
 auditLogSchema.index({ organizationId: 1, departmentId: 1, timestamp: -1 });
 
 const APPEND_ONLY_ERROR = 'Audit logs are append-only and cannot be modified or deleted.';
+
+auditLogSchema.pre('validate', async function recordActorPlatformRole() {
+  if (this.actorPlatformRole !== undefined) return;
+  const actorQuery = User.findById(this.actorId).select('platformRole');
+  const session = this.$session();
+  if (session) actorQuery.session(session);
+  const actor = await actorQuery.lean();
+  this.actorPlatformRole = actor?.platformRole || null;
+});
 
 auditLogSchema.pre('save', function preventAuditLogUpdate(next) {
   if (!this.isNew) {

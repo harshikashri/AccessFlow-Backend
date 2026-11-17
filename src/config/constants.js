@@ -61,6 +61,7 @@ export const DEPARTMENT_MANAGER_PERMISSIONS = [
   'departments.edit',
   'requests.view',
   'requests.approve',
+  'requests.create',
   'dashboard.view',
 ];
 export const DEPARTMENT_MEMBER_PERMISSIONS = [

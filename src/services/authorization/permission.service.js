@@ -3,6 +3,10 @@ import Organization from '../../models/Organization.js';
 import UserRoleAssignment from '../../models/UserRoleAssignment.js';
 import Department from '../../models/Department.js';
 import { AppError } from '../../utils/AppError.js';
+import {
+  ORGANIZATION_ADMIN_PERMISSIONS,
+  ORGANIZATION_ADMIN_ROLE_NAME,
+} from '../../config/constants.js';
 
 export const resolveEffectivePermissions = async ({ userId, organizationId }) => {
   if (!userId || !organizationId) {
@@ -56,7 +60,13 @@ export const resolveEffectivePermissions = async ({ userId, organizationId }) =>
   const effectiveAssignments = [];
   for (const assignment of activeAssignments) {
     const role = assignment.roleId;
-    const permissions = role.permissions || [];
+    const isOrganizationAdmin =
+      assignment.scopeType === 'ORGANIZATION' &&
+      !assignment.departmentId &&
+      (role.roleType === 'ORGANIZATION_ADMIN' || role.name === ORGANIZATION_ADMIN_ROLE_NAME);
+    const permissions = isOrganizationAdmin
+      ? ORGANIZATION_ADMIN_PERMISSIONS
+      : role.permissions || [];
     if (assignment.scopeType === 'ORGANIZATION' && !assignment.departmentId) {
       for (const permission of permissions) organizationPermissions.add(permission);
       effectiveAssignments.push(assignment);

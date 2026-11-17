@@ -112,6 +112,9 @@ describe('Organization management', () => {
     const logs = await AuditLog.find({ organizationId: organization._id }).lean();
     expect(logs.some((entry) => entry.action === 'ORGANIZATION_CREATED')).toBe(true);
     expect(logs.some((entry) => entry.action === 'ORGANIZATION_ADMIN_CREATED')).toBe(true);
+    expect(logs.find((entry) => entry.action === 'ORGANIZATION_CREATED').actorPlatformRole).toBe(
+      'SUPER_ADMIN'
+    );
   });
 
   it('rejects unauthenticated or unauthorized organization creation', async () => {

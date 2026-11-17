@@ -185,6 +185,20 @@ describe('Department management', () => {
     expect(response.body.data.pagination.total).toBe(1);
   });
 
+  it('sorts department results by the selected field', async () => {
+    const { token } = await createOrganizationContext('sort');
+    await createDepartment(token, { name: 'Zulu' });
+    await createDepartment(token, { name: 'Alpha' });
+    await createDepartment(token, { name: 'Middle' });
+
+    const response = await request(app)
+      .get('/api/departments?sortBy=name&sortOrder=asc')
+      .set(authHeader(token));
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.items.map(({ name }) => name)).toEqual(['Alpha', 'Middle', 'Zulu']);
+  });
+
   it('validates pagination and returns an empty page consistently', async () => {
     const { token } = await createOrganizationContext();
     const invalid = await request(app)

@@ -20,6 +20,7 @@ const publicWorkflow = (workflow) => ({
   name: workflow.name,
   description: workflow.description || '',
   requestTypeId: workflow.requestTypeId ? String(workflow.requestTypeId) : null,
+  workflowScope: workflow.workflowScope || 'DEPARTMENT',
   selectionCondition: workflow.selectionCondition || null,
   priority: workflow.priority ?? 0,
   version: workflow.version,
@@ -149,6 +150,7 @@ const latestVersion = async ({ organizationId, requestTypeId, isDefault, session
 const assertPriorityAvailable = async ({
   organizationId,
   requestTypeId,
+  workflowScope = 'DEPARTMENT',
   priority,
   exceptWorkflowId = null,
   session,
@@ -156,6 +158,9 @@ const assertPriorityAvailable = async ({
   const priorityFilter = priority === 0
     ? { $or: [{ priority: 0 }, { priority: { $exists: false } }] }
     : { priority };
+  const scopeFilter = workflowScope === 'DEPARTMENT'
+    ? { $or: [{ workflowScope: 'DEPARTMENT' }, { workflowScope: { $exists: false } }] }
+    : { workflowScope };
   const query = WorkflowDefinition.findOne({
     organizationId,
     definitionType: 'APPROVAL_WORKFLOW',
@@ -163,7 +168,7 @@ const assertPriorityAvailable = async ({
     isDefault: false,
     isActive: true,
     ...(exceptWorkflowId ? { _id: { $ne: exceptWorkflowId } } : {}),
-    ...priorityFilter,
+    $and: [scopeFilter, priorityFilter],
   }).select('_id');
   if (session) query.session(session);
   if (await query) {
@@ -211,6 +216,7 @@ export const initializeDefaultApprovalWorkflow = async ({ session, organizationI
     name: 'Default Approval Workflow',
     description: 'Mandatory department manager approval with conditional finance approval.',
     requestTypeId: null,
+    workflowScope: 'DEPARTMENT',
     isDefault: true,
     isActive: true,
     selectionCondition: null,
@@ -266,11 +272,15 @@ export const initializeDefaultApprovalWorkflow = async ({ session, organizationI
 export const createWorkflow = async ({ organizationId, actorId, input }) => withTransaction(async (session) => {
   await assertOrganization(organizationId, session);
   const isDefault = input.isDefault === true;
+  const workflowScope = input.workflowScope || 'DEPARTMENT';
   const requestTypeId = isDefault ? null : input.requestTypeId;
   if (!isDefault && !requestTypeId) {
     throw new AppError('Custom workflows must target a request type.', 400, 'REQUEST_TYPE_REQUIRED');
   }
   if (isDefault) {
+    if (workflowScope !== 'DEPARTMENT') {
+      throw new AppError('The organization default workflow must be department-scoped.', 400, 'DEFAULT_WORKFLOW_SCOPE_INVALID');
+    }
     const activeDefault = await WorkflowDefinition.exists({
       organizationId,
       definitionType: 'APPROVAL_WORKFLOW',
@@ -293,6 +303,7 @@ export const createWorkflow = async ({ organizationId, actorId, input }) => with
     await assertPriorityAvailable({
       organizationId,
       requestTypeId,
+      workflowScope,
       priority,
       session,
     });
@@ -304,6 +315,7 @@ export const createWorkflow = async ({ organizationId, actorId, input }) => with
     organizationId,
     definitionType: 'APPROVAL_WORKFLOW',
     requestTypeId,
+    workflowScope,
     isDefault,
     selectionCondition,
     priority,
@@ -345,6 +357,7 @@ export const updateWorkflow = async ({ organizationId, actorId, workflowId, inpu
     throw new AppError('A workflow cannot be converted between default and request-type scope while editing.', 409, 'WORKFLOW_SCOPE_IMMUTABLE');
   }
   const stages = input.stages;
+  const workflowScope = input.workflowScope ?? current.workflowScope ?? 'DEPARTMENT';
   const requestTypeId = current.isDefault ? null : (input.requestTypeId ?? current.requestTypeId);
   const requestType = await findRequestType({ organizationId, requestTypeId, session });
   const selectionCondition = input.selectionCondition === undefined
@@ -362,6 +375,7 @@ export const updateWorkflow = async ({ organizationId, actorId, workflowId, inpu
     await assertPriorityAvailable({
       organizationId,
       requestTypeId,
+      workflowScope,
       priority,
       exceptWorkflowId: current._id,
       session,
@@ -374,6 +388,7 @@ export const updateWorkflow = async ({ organizationId, actorId, workflowId, inpu
     organizationId,
     definitionType: 'APPROVAL_WORKFLOW',
     requestTypeId,
+    workflowScope,
     selectionCondition,
     priority,
     isDefault: current.isDefault,
@@ -422,6 +437,7 @@ export const setWorkflowStatus = async ({ organizationId, actorId, workflowId, i
       await assertPriorityAvailable({
         organizationId,
         requestTypeId: workflow.requestTypeId,
+        workflowScope: workflow.workflowScope || 'DEPARTMENT',
         priority: workflow.priority ?? 0,
         exceptWorkflowId: workflow._id,
         session,
@@ -448,6 +464,7 @@ export const validateWorkflow = async ({ organizationId, input }) => {
     await assertPriorityAvailable({
       organizationId,
       requestTypeId: input.requestTypeId,
+      workflowScope: input.workflowScope || 'DEPARTMENT',
       priority: input.priority ?? 0,
     });
   }

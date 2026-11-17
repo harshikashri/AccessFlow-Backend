@@ -65,6 +65,25 @@ const assertUserScope = (user, organizationId, access, permission) => {
 	return membership;
 };
 
+const getDepartmentMemberDepartmentIds = (access) => {
+	const assignments = access?.assignments || [];
+	if (assignments.some(({ roleId }) => roleId?.roleType === 'CUSTOM')) return [];
+	return [
+		...new Set(
+			assignments
+				.filter(({ roleId, scopeType, departmentId }) =>
+					roleId?.roleType === 'EMPLOYEE' && scopeType === 'DEPARTMENT' && departmentId
+				)
+				.map(({ departmentId }) => String(departmentId))
+		),
+	];
+};
+
+const emptyUserList = (page, limit) => ({
+	users: [],
+	pagination: { page, limit, total: 0, totalPages: 0, hasNextPage: false, hasPreviousPage: page > 1 },
+});
+
 const assertDepartmentScope = (access, permission, departmentId) => {
 	if (access.organizationPermissions.has(permission)) return true;
 	if (departmentId && getScopedDepartmentIds(access, permission).includes(String(departmentId))) return true;
@@ -267,6 +286,9 @@ export const createUser = async ({
 
 export const getUserById = async ({ userId, organizationId, access }) => {
 	await assertActiveOrganization(organizationId);
+	if (getDepartmentMemberDepartmentIds(access).length) {
+		throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
+	}
 	const user = await getUserInOrganization({ userId, organizationId });
 	if (!user) throw new AppError('User not found.', 404, 'USER_NOT_FOUND');
 	const membership = assertUserScope(user, organizationId, access, 'users.view');
@@ -282,26 +304,174 @@ export const listUsers = async ({ organizationId, access, page, limit, search, s
 
 	const organizationCanView = access.organizationPermissions.has('users.view');
 	const scopedIds = getScopedDepartmentIds(access, 'users.view');
-	if (!organizationCanView) {
+	const departmentMemberDepartmentIds = getDepartmentMemberDepartmentIds(access);
+	const departmentMemberAccess = departmentMemberDepartmentIds.length > 0;
+	let organizationRoleIds = [];
+	let organizationRoleUserIds = [];
+	let roleOptions = [];
+
+	if (departmentMemberAccess) {
+		if (
+			requestedDepartmentId &&
+			!departmentMemberDepartmentIds.includes(String(requestedDepartmentId))
+		) {
+			return emptyUserList(page, limit);
+		}
+
+		organizationRoleIds = await Role.find({
+			organizationId: organizationObjectId,
+			status: 'ACTIVE',
+			$or: [
+				{ roleType: 'ORGANIZATION_ADMIN' },
+				{ name: ORGANIZATION_ADMIN_ROLE_NAME },
+				{ roleType: 'CUSTOM' },
+			],
+		}).distinct('_id');
+		if (organizationRoleIds.length) {
+			organizationRoleUserIds = await UserRoleAssignment.distinct('userId', {
+				organizationId: organizationObjectId,
+				roleId: { $in: organizationRoleIds },
+				scopeType: 'ORGANIZATION',
+				departmentId: null,
+				status: 'ACTIVE',
+			});
+		}
+		const departmentMemberUserIds = await User.distinct('_id', {
+			platformRole: { $ne: 'SUPER_ADMIN' },
+			organizationMemberships: {
+				$elemMatch: {
+					organizationId: organizationObjectId,
+					status: 'ACTIVE',
+					departmentId: {
+						$in: departmentMemberDepartmentIds.map((id) => new mongoose.Types.ObjectId(id)),
+					},
+				},
+			},
+		});
+		const [departmentRoleIds, assignedOrganizationRoleIds] = await Promise.all([
+			departmentMemberUserIds.length
+				? UserRoleAssignment.distinct('roleId', {
+						organizationId: organizationObjectId,
+						userId: { $in: departmentMemberUserIds },
+						scopeType: 'DEPARTMENT',
+						departmentId: {
+							$in: departmentMemberDepartmentIds.map((id) => new mongoose.Types.ObjectId(id)),
+						},
+						status: 'ACTIVE',
+					})
+				: [],
+			organizationRoleUserIds.length
+				? UserRoleAssignment.distinct('roleId', {
+						organizationId: organizationObjectId,
+						userId: { $in: organizationRoleUserIds },
+						roleId: { $in: organizationRoleIds },
+						scopeType: 'ORGANIZATION',
+						departmentId: null,
+						status: 'ACTIVE',
+					})
+				: [],
+		]);
+		const roleIds = [...new Set([...departmentRoleIds, ...assignedOrganizationRoleIds].map(String))]
+			.map((id) => new mongoose.Types.ObjectId(id));
+		if (roleIds.length) {
+			roleOptions = await Role.find({
+				_id: { $in: roleIds },
+				organizationId: organizationObjectId,
+				status: 'ACTIVE',
+			})
+				.select('_id name')
+				.sort({ name: 1 })
+				.lean()
+				.then((roles) => roles.map((role) => ({ id: String(role._id), name: role.name })));
+		}
+	} else if (!organizationCanView) {
 		if (requestedDepartmentId === null || (requestedDepartmentId && !scopedIds.includes(String(requestedDepartmentId)))) {
-			return {
-				users: [],
-				pagination: { page, limit, total: 0, totalPages: 0, hasNextPage: false, hasPreviousPage: page > 1 },
-			};
+			return emptyUserList(page, limit);
 		}
 		membershipFilter.departmentId = { $in: scopedIds.map((id) => new mongoose.Types.ObjectId(id)) };
 	}
 	if (departmentId !== undefined) membershipFilter.departmentId = requestedDepartmentId;
 
-	const match = { organizationMemberships: { $elemMatch: membershipFilter } };
+	const match = departmentMemberAccess
+		? {
+				$and: [
+					{ platformRole: { $ne: 'SUPER_ADMIN' } },
+					{
+						$or: [
+							{
+								organizationMemberships: {
+									$elemMatch: {
+										organizationId: organizationObjectId,
+										status: 'ACTIVE',
+										departmentId:
+											requestedDepartmentId === null
+												? { $in: [] }
+												: requestedDepartmentId || {
+														$in: departmentMemberDepartmentIds.map(
+															(id) => new mongoose.Types.ObjectId(id)
+														),
+													},
+									},
+								},
+							},
+							...(organizationRoleUserIds.length
+								? [
+										{
+											_id: { $in: organizationRoleUserIds },
+											organizationMemberships: {
+												$elemMatch: {
+													organizationId: organizationObjectId,
+													status: 'ACTIVE',
+													...(departmentId !== undefined
+														? { departmentId: requestedDepartmentId }
+														: {}),
+												},
+											},
+										},
+									]
+								: []),
+						],
+					},
+				],
+			}
+		: { organizationMemberships: { $elemMatch: membershipFilter } };
 	if (status) match.accountStatus = status;
 	if (search) {
 		const expression = { $regex: escapeRegex(search), $options: 'i' };
-		match.$or = [{ name: expression }, { email: expression }];
+		if (departmentMemberAccess) {
+			match.$and.push({ $or: [{ name: expression }, { email: expression }] });
+		} else {
+			match.$or = [{ name: expression }, { email: expression }];
+		}
 	}
 
 	const pipeline = [{ $match: match }];
 	if (roleId) {
+		const permittedScopeMatch = departmentMemberAccess
+			? {
+					$or: [
+						{
+							$and: [
+								{ $eq: ['$scopeType', 'DEPARTMENT'] },
+								{
+									$in: [
+										'$departmentId',
+										departmentMemberDepartmentIds.map(
+											(id) => new mongoose.Types.ObjectId(id)
+										),
+									],
+								},
+							],
+						},
+						{
+							$and: [
+								{ $eq: ['$scopeType', 'ORGANIZATION'] },
+								{ $in: ['$roleId', organizationRoleIds] },
+							],
+						},
+					],
+				}
+			: null;
 		pipeline.push(
 			{
 				$lookup: {
@@ -315,6 +485,7 @@ export const listUsers = async ({ organizationId, access, page, limit, search, s
 									{ $eq: ['$organizationId', organizationObjectId] },
 									{ $eq: ['$roleId', new mongoose.Types.ObjectId(roleId)] },
 									{ $eq: ['$status', 'ACTIVE'] },
+									...(permittedScopeMatch ? [permittedScopeMatch] : []),
 								],
 							},
 						},
@@ -356,16 +527,28 @@ export const listUsers = async ({ organizationId, access, page, limit, search, s
 	const userIds = result.users.map((user) => user._id);
 	const roleAssignments = await getRoleAssignments(userIds, organizationObjectId);
 	const users = await Promise.all(result.users.map(async (user) => {
+		const assignments = roleAssignments.get(String(user._id)) || [];
+		const visibleAssignments = departmentMemberAccess
+			? assignments.filter((assignment) =>
+					(assignment.scopeType === 'DEPARTMENT' &&
+						departmentMemberDepartmentIds.includes(String(assignment.departmentId))) ||
+					(assignment.scopeType === 'ORGANIZATION' &&
+						!assignment.departmentId &&
+						organizationRoleIds.some(
+							(roleId) => String(roleId) === String(assignment.roleId?._id || assignment.roleId)
+						))
+				)
+			: assignments;
 		const profile = await makePublicProfile(
 			user,
 			organizationId,
 			user.membership,
-			roleAssignments.get(String(user._id)) || []
+			visibleAssignments
 		);
 		return { ...profile, passwordSetupRequired: user.passwordSetupRequired };
 	}));
 	const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
-	return {
+	const response = {
 		users,
 		pagination: {
 			page,
@@ -376,6 +559,8 @@ export const listUsers = async ({ organizationId, access, page, limit, search, s
 			hasPreviousPage: page > 1,
 		},
 	};
+	if (departmentMemberAccess) response.roleOptions = roleOptions;
+	return response;
 };
 
 export const updateUser = async ({ userId, organizationId, actorId, access, input }) => {

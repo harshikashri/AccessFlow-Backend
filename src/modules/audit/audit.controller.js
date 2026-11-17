@@ -7,6 +7,12 @@ export const listAuditLogs = async (req, res) => {
   return res.status(200).json({ success: true, message: 'Audit logs retrieved successfully.', data });
 };
 
+export const listSuperAdminAuditLogs = async (req, res) => {
+  const query = validateAuditListQuery(req.query);
+  const data = await auditService.listSuperAdminAuditLogs({ auth: req.auth, query });
+  return res.status(200).json({ success: true, message: 'Super Admin audit logs retrieved successfully.', data });
+};
+
 export const getAuditLog = async (req, res) => {
   const data = await auditService.getAuditLog({
     auth: req.auth,

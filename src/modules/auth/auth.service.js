@@ -12,12 +12,26 @@ import {
   hashToken,
 } from '../../utils/token.js';
 import {
+  DEPARTMENT_MANAGER_ROLE_NAME,
+  DEPARTMENT_MEMBER_ROLE_NAME,
+  ORGANIZATION_ADMIN_PERMISSIONS,
+  ORGANIZATION_ADMIN_ROLE_NAME,
+} from '../../config/constants.js';
+import {
   findActiveMembership,
   getActiveMemberships,
   isSuperAdmin,
   toObjectIdOrNull,
   toPublicUser,
 } from './auth.utils.js';
+
+const getRoleType = (role) => {
+  if (role?.roleType) return role.roleType;
+  if (role?.name === ORGANIZATION_ADMIN_ROLE_NAME) return 'ORGANIZATION_ADMIN';
+  if (role?.name === DEPARTMENT_MANAGER_ROLE_NAME) return 'DEPARTMENT_MANAGER';
+  if (role?.name === DEPARTMENT_MEMBER_ROLE_NAME) return 'EMPLOYEE';
+  return 'CUSTOM';
+};
 
 const serializeAuthorization = (access) => {
   const departmentPermissions = {};
@@ -34,10 +48,51 @@ const serializeAuthorization = (access) => {
     permissions.sort();
   }
 
+  const assignmentsByRoleAndScope = new Map();
+  for (const assignment of access?.assignments || []) {
+    const role = assignment.roleId;
+    if (!role) continue;
+
+    const roleType = getRoleType(role);
+    const isOrganizationAdmin =
+      assignment.scopeType === 'ORGANIZATION' &&
+      !assignment.departmentId &&
+      roleType === 'ORGANIZATION_ADMIN';
+    const permissions = isOrganizationAdmin
+      ? ORGANIZATION_ADMIN_PERMISSIONS
+      : role.permissions || [];
+    const key = `${String(role._id ?? role.name)}:${assignment.scopeType}`;
+    if (!assignmentsByRoleAndScope.has(key)) {
+      assignmentsByRoleAndScope.set(key, {
+        roleName: role.name,
+        roleType,
+        scopeType: assignment.scopeType,
+        permissions: new Set(),
+      });
+    }
+    for (const permission of permissions) {
+      assignmentsByRoleAndScope.get(key).permissions.add(permission);
+    }
+  }
+
+  const rolePermissions = [...assignmentsByRoleAndScope.values()]
+    .map(({ permissions, ...assignment }) => ({
+      ...assignment,
+      permissions: [...permissions].sort(),
+    }))
+    .sort(
+      (left, right) =>
+        left.roleName.localeCompare(right.roleName) ||
+        left.scopeType.localeCompare(right.scopeType),
+    );
+  const roleTypes = [...new Set(rolePermissions.map(({ roleType }) => roleType))].sort();
+
   return {
     platformPermissions: [],
     organizationPermissions: [...(access?.organizationPermissions || [])].sort(),
     departmentPermissions,
+    roleTypes,
+    rolePermissions,
   };
 };
 

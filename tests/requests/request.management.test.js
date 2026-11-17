@@ -531,6 +531,170 @@ describe('Request management', () => {
       .toBe(String(fallback._id));
   });
 
+  it('creates and routes requests without department membership through organization workflows', async () => {
+    const context = await setup('organization-level-request');
+    const requestType = await createType(context.adminToken, {
+      code: 'ORGANIZATION_REQUEST',
+    });
+    expect(requestType.status).toBe(201);
+
+    const approver = await createUser({
+      email: 'request-organization-approver@example.com',
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: null,
+        status: 'ACTIVE',
+      }],
+    });
+    const approverRole = await Role.create({
+      organizationId: context.organizationId,
+      name: 'Organization Request Approver',
+      roleType: 'CUSTOM',
+      assignmentScopes: ['ORGANIZATION'],
+      permissions: ['requests.approve'],
+      status: 'ACTIVE',
+      createdBy: context.admin._id,
+    });
+    await UserRoleAssignment.create({
+      userId: approver._id,
+      roleId: approverRole._id,
+      organizationId: context.organizationId,
+      departmentId: null,
+      scopeType: 'ORGANIZATION',
+      status: 'ACTIVE',
+      assignedBy: context.admin._id,
+    });
+    const approverLogin = await loginRequest({ email: approver.email, password: TEST_PASSWORD });
+
+    const workflow = await request(app)
+      .post('/api/approval-workflows')
+      .set(authHeader(context.adminToken))
+      .send({
+        name: 'Organization request approval',
+        description: '',
+        requestTypeId: requestType.body.data.id,
+        workflowScope: 'ORGANIZATION',
+        isDefault: false,
+        priority: 1,
+        selectionCondition: null,
+        stages: [{
+          stageId: 'organization-approver',
+          sequence: 1,
+          name: 'Organization approval',
+          description: '',
+          approverType: 'ROLE',
+          assignment: {
+            type: 'ROLE',
+            roleId: String(approverRole._id),
+            resolution: 'CLAIM_ONE',
+            scopeType: 'ORGANIZATION',
+          },
+          roleId: String(approverRole._id),
+          approvalMode: 'ANY',
+          isMandatory: true,
+          isConfigurable: true,
+          condition: null,
+        }],
+      });
+    expect(workflow.status, JSON.stringify(workflow.body)).toBe(201);
+    expect(workflow.body.data.workflowScope).toBe('ORGANIZATION');
+
+    const adminRole = await Role.findOne({
+      organizationId: context.organizationId,
+      roleType: 'ORGANIZATION_ADMIN',
+    });
+    adminRole.permissions = adminRole.permissions.filter(
+      (permission) => permission !== 'requests.edit_own_draft',
+    );
+    await adminRole.save();
+
+    const organizationCreator = await createUser({
+      email: 'request-organization-creator@example.com',
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: context.department._id,
+        status: 'ACTIVE',
+      }],
+    });
+    const creatorRole = await Role.create({
+      organizationId: context.organizationId,
+      name: 'Organization Request Creator',
+      roleType: 'CUSTOM',
+      assignmentScopes: ['ORGANIZATION'],
+      permissions: ['requests.create', 'requests.submit'],
+      status: 'ACTIVE',
+      createdBy: context.admin._id,
+    });
+    await UserRoleAssignment.create({
+      userId: organizationCreator._id,
+      roleId: creatorRole._id,
+      organizationId: context.organizationId,
+      departmentId: null,
+      scopeType: 'ORGANIZATION',
+      status: 'ACTIVE',
+      assignedBy: context.admin._id,
+    });
+    const creatorLogin = await loginRequest({
+      email: organizationCreator.email,
+      password: TEST_PASSWORD,
+    });
+
+    const created = await request(app)
+      .post('/api/requests')
+      .set(authHeader(context.adminToken))
+      .send({
+        requestTypeId: requestType.body.data.id,
+        title: 'Organization-level request',
+        details: { itemName: 'Shared equipment', quantity: 1 },
+      });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    expect(created.body.data.departmentId).toBeNull();
+
+    const updated = await request(app)
+      .patch(`/api/requests/${created.body.data.id}`)
+      .set(authHeader(context.adminToken))
+      .send({ title: 'Updated organization-level request' });
+    expect(updated.status, JSON.stringify(updated.body)).toBe(200);
+    expect(updated.body.data.title).toBe('Updated organization-level request');
+
+    const submitted = await request(app)
+      .post(`/api/requests/${created.body.data.id}/submit`)
+      .set(authHeader(context.adminToken))
+      .send({});
+    expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
+    expect(submitted.body.data.workflowDefinitionId).toBe(workflow.body.data.id);
+
+    const approvalStep = await ApprovalStep.findOne({
+      requestId: created.body.data.id,
+      stageId: 'organization-approver',
+    }).lean();
+    expect(String(approvalStep.approverId)).toBe(String(approver._id));
+    expect(approvalStep.status).toBe('ACTIVE');
+
+    const visibleRequest = await request(app)
+      .get(`/api/requests/${created.body.data.id}`)
+      .set(authHeader(approverLogin.body.data.accessToken));
+    expect(visibleRequest.status, JSON.stringify(visibleRequest.body)).toBe(200);
+    expect(visibleRequest.body.data.departmentId).toBeNull();
+
+    const membershipRequest = await request(app)
+      .post('/api/requests')
+      .set(authHeader(creatorLogin.body.data.accessToken))
+      .send({
+        requestTypeId: requestType.body.data.id,
+        title: 'Organization-scope member request',
+        details: { itemName: 'Shared equipment', quantity: 1 },
+      });
+    expect(membershipRequest.status, JSON.stringify(membershipRequest.body)).toBe(201);
+    expect(membershipRequest.body.data.departmentId).toBeNull();
+    const membershipSubmission = await request(app)
+      .post(`/api/requests/${membershipRequest.body.data.id}/submit`)
+      .set(authHeader(creatorLogin.body.data.accessToken))
+      .send({});
+    expect(membershipSubmission.status, JSON.stringify(membershipSubmission.body)).toBe(200);
+    expect(membershipSubmission.body.data.workflowDefinitionId).toBe(workflow.body.data.id);
+  });
+
   it('resolves a dual-scope workflow role only at its explicitly configured organization scope', async () => {
     const context = await setup('dual-scope-workflow-resolution');
     const purchaseType = await createPurchaseType(context.adminToken, {
@@ -1620,6 +1784,27 @@ describe('Request management', () => {
     })).toBe(1);
   });
 
+  it('allows department managers to create requests in their department', async () => {
+    const context = await setup('department-manager-request-create');
+    const type = await createType(context.adminToken, {
+      name: 'Manager Request',
+      code: 'MANAGER_REQUEST',
+      fields: [{ key: 'reason', label: 'Reason', type: 'TEXT', required: true }],
+    });
+
+    const created = await request(app)
+      .post('/api/requests')
+      .set(authHeader(context.managerToken))
+      .send({
+        requestTypeId: type.body.data.id,
+        title: 'Manager-created request',
+        details: { reason: 'Department needs equipment.' },
+      });
+
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    expect(created.body.data.departmentId).toBe(String(context.department._id));
+  });
+
   it('merges partial dynamic-field updates and validates the final details', async () => {
     const context = await setup('partial-dynamic-update');
     const type = await createPurchaseType(context.adminToken);
@@ -2240,6 +2425,7 @@ describe('Request management', () => {
       .query({ category: 'available' });
     expect(inbox.status).toBe(200);
     expect(inbox.body.data.pagination.total).toBe(1);
+    expect(inbox.body.data.items[0].request.requesterName).toBe(context.member.name);
     const stepId = inbox.body.data.items[0]._id;
 
     const details = await request(app)
@@ -2264,6 +2450,20 @@ describe('Request management', () => {
       .set(authHeader(context.memberToken));
     expect(progress.status).toBe(200);
     expect(progress.body.data.request.status).toBe('RETURNED');
+    expect(progress.body.data.stages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stageName: expect.any(String),
+          status: 'RETURNED',
+          approverType: expect.any(String),
+          approverNames: expect.any(Array),
+          approvalMode: expect.any(String),
+          scopeType: expect.any(String),
+          comments: expect.any(Array),
+        }),
+      ])
+    );
+    expect(progress.body.data.stages.some((stage) => typeof stage.approverRoleName === 'string')).toBe(true);
 
     const history = await request(app)
       .get(`/api/requests/${created.body.data.id}/approval-history`)

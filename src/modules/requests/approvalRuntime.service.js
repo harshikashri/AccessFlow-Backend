@@ -35,6 +35,7 @@ const audit = async (session, { organizationId, actorId, action, resourceId, cha
 const workflowForRequest = async ({
   organizationId,
   requestTypeId,
+  departmentId,
   workflowDefinitionId,
   workflowVersion,
   details = {},
@@ -57,11 +58,13 @@ const workflowForRequest = async ({
     isActive: true,
     $or: [{ requestTypeId }, { isDefault: true }],
   }).session(session);
+  const workflowScope = departmentId ? 'DEPARTMENT' : 'ORGANIZATION';
   const conditionData = { ...(details || {}) };
   if (amount !== null && amount !== undefined) conditionData.amount = amount;
   const matching = candidates
     .filter((workflow) =>
       !workflow.isDefault &&
+      (workflow.workflowScope || 'DEPARTMENT') === workflowScope &&
       String(workflow.requestTypeId) === String(requestTypeId) &&
       evaluateCondition(workflow.selectionCondition, conditionData))
     .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0));
@@ -79,12 +82,22 @@ const workflowForRequest = async ({
     }
     return highestPriorityMatches[0];
   }
-  const defaults = candidates.filter((workflow) => workflow.isDefault);
+  const defaults = candidates.filter(
+    (workflow) => workflow.isDefault && (workflow.workflowScope || 'DEPARTMENT') === workflowScope,
+  );
   if (defaults.length !== 1) {
     throw new AppError(
-      defaults.length ? 'Multiple active organization default workflows are configured.' : 'No active approval workflow matches this request and no active default fallback is configured.',
+      defaults.length
+        ? 'Multiple active organization default workflows are configured.'
+        : workflowScope === 'ORGANIZATION'
+          ? 'No active organization-level approval workflow matches this request.'
+          : 'No active approval workflow matches this request and no active default fallback is configured.',
       409,
-      defaults.length ? 'AMBIGUOUS_DEFAULT_WORKFLOW' : 'WORKFLOW_NOT_FOUND',
+      defaults.length
+        ? 'AMBIGUOUS_DEFAULT_WORKFLOW'
+        : workflowScope === 'ORGANIZATION'
+          ? 'ORGANIZATION_WORKFLOW_NOT_FOUND'
+          : 'WORKFLOW_NOT_FOUND',
     );
   }
   return defaults[0];
@@ -236,6 +249,7 @@ export const createRuntimeApprovals = async ({
   const workflow = await workflowForRequest({
     organizationId,
     requestTypeId: request.requestTypeId,
+    departmentId: request.departmentId,
     workflowDefinitionId,
     workflowVersion,
     details: request.details,
@@ -650,7 +664,16 @@ const enrichApprovalSteps = async (organizationId, steps) => {
   const requests = await Request.find({ _id: { $in: requestIds } })
     .select('requestNumber requestTypeId requestTypeName title requesterId departmentId status currentSequence submittedAt')
     .lean();
-  const requestMap = new Map(requests.map((request) => [String(request._id), request]));
+  const requesterIds = [...new Set(requests.map((request) => String(request.requesterId)))];
+  const requesters = await User.find({ _id: { $in: requesterIds } }).select('_id name').lean();
+  const requesterNameMap = new Map(requesters.map((requester) => [String(requester._id), requester.name]));
+  const requestMap = new Map(requests.map((request) => [
+    String(request._id),
+    {
+      ...request,
+      requesterName: requesterNameMap.get(String(request.requesterId)) || null,
+    },
+  ]));
   const roles = roleIds.length
     ? await Role.find({ _id: { $in: roleIds }, organizationId }).select('_id name').lean()
     : [];

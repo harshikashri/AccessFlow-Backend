@@ -132,6 +132,11 @@ const workflowDefinitionSchema = new mongoose.Schema(
       ref: 'WorkflowDefinition',
       default: null,
     },
+    workflowScope: {
+      type: String,
+      enum: ['DEPARTMENT', 'ORGANIZATION'],
+      default: 'DEPARTMENT',
+    },
     code: {
       type: String,
       trim: true,
@@ -199,7 +204,7 @@ workflowDefinitionSchema.index({ organizationId: 1, requestType: 1, isActive: 1 
 workflowDefinitionSchema.index({ organizationId: 1, name: 1, version: 1 }, { unique: true });
 workflowDefinitionSchema.index({ organizationId: 1, requestTypeId: 1, version: 1 });
 workflowDefinitionSchema.index(
-  { organizationId: 1, requestTypeId: 1, priority: 1 },
+  { organizationId: 1, requestTypeId: 1, workflowScope: 1, priority: 1 },
   {
     unique: true,
     partialFilterExpression: {

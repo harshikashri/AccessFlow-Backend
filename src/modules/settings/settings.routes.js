@@ -13,7 +13,6 @@ router.get('/notifications', asyncHandler(controller.getNotificationPreferences)
 router.patch('/notifications', asyncHandler(controller.updateNotificationPreferences));
 router.get('/sessions', asyncHandler(controller.listSessions));
 router.post('/sessions/:sessionId/revoke', asyncHandler(controller.revokeSession));
-router.post('/security/password', asyncHandler(controller.changePassword));
 router.get('/organization', asyncHandler(controller.getOrganizationSettings));
 
 export default router;

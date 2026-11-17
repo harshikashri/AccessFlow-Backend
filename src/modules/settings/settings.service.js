@@ -3,7 +3,6 @@ import Organization from '../../models/Organization.js';
 import Session from '../../models/Session.js';
 import AuditLog from '../../models/AuditLog.js';
 import { AppError } from '../../utils/AppError.js';
-import { hashPassword, verifyPassword } from '../../utils/password.js';
 import { withTransaction } from '../../utils/transaction.js';
 
 const audit = async (session, { organizationId, actorId, action, changes = {} }) => {
@@ -101,20 +100,6 @@ export const revokeSession = async ({ userId, organizationId, sessionId, targetS
     changes: { current: String(sessionId) === String(targetSessionId) },
   }]);
   return { revoked: result.modifiedCount > 0 };
-};
-
-export const changePassword = async ({ userId, organizationId, sessionId, currentPassword, password }) => {
-  const user = await User.findById(userId).select('+passwordHash');
-  if (!user || !(await verifyPassword(currentPassword, user.passwordHash))) {
-    throw new AppError('Current password is incorrect.', 400, 'INVALID_CURRENT_PASSWORD');
-  }
-  user.passwordHash = await hashPassword(password);
-  await withTransaction(async (session) => {
-    await user.save({ session });
-    await Session.updateMany({ userId, _id: { $ne: sessionId }, revokedAt: null }, { $set: { revokedAt: new Date() } }, { session });
-    await audit(session, { organizationId, actorId: userId, action: 'PASSWORD_CHANGED', changes: { otherSessionsRevoked: true } });
-  });
-  return { changed: true };
 };
 
 export const getOrganizationSettings = async ({ organizationId }) => {

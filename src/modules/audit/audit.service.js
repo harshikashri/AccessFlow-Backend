@@ -1,8 +1,28 @@
 import AuditLog from '../../models/AuditLog.js';
+import User from '../../models/User.js';
+import { AUDIT_ACTIONS, AUDIT_RESOURCE_TYPES } from '../../config/constants.js';
 import { AppError } from '../../utils/AppError.js';
 import { hasEffectivePermission } from '../../services/authorization/permission.service.js';
 
 const SENSITIVE_KEYS = /password|token|secret|credential|apiKey|accessKey|refresh/i;
+
+const PLATFORM_AUDIT_EVENTS = [
+  {
+    resourceType: AUDIT_RESOURCE_TYPES.ORGANIZATION,
+    action: {
+      $in: [
+        AUDIT_ACTIONS.ORGANIZATION_CREATED,
+        AUDIT_ACTIONS.ORGANIZATION_UPDATED,
+        AUDIT_ACTIONS.ORGANIZATION_ACTIVATED,
+        AUDIT_ACTIONS.ORGANIZATION_DEACTIVATED,
+      ],
+    },
+  },
+  {
+    resourceType: AUDIT_RESOURCE_TYPES.USER,
+    action: AUDIT_ACTIONS.ORGANIZATION_ADMIN_CREATED,
+  },
+];
 
 const safeValue = (value) => {
   if (Array.isArray(value)) return value.map(safeValue);
@@ -19,7 +39,10 @@ const publicAudit = (log) => ({
   id: String(log._id),
   organizationId: log.organizationId ? String(log.organizationId) : null,
   departmentId: log.departmentId ? String(log.departmentId) : null,
-  actorId: log.actorId ? String(log.actorId) : null,
+  actorId: log.actorId
+    ? String(typeof log.actorId === 'object' ? log.actorId._id : log.actorId)
+    : null,
+  actorPlatformRole: log.actorPlatformRole || null,
   actor: log.actorId && typeof log.actorId === 'object'
     ? { id: String(log.actorId._id), name: log.actorId.name, email: log.actorId.email }
     : null,
@@ -82,17 +105,49 @@ const populateAudit = (query) => query
   .populate({ path: 'organizationId', select: 'name' })
   .populate({ path: 'departmentId', select: 'name' });
 
-export const listAuditLogs = async ({ auth, access, query }) => {
-  const filter = buildFilter({ auth, access, query });
-  const sort = { [query.sortBy]: query.sortOrder === 'asc' ? 1 : -1, _id: 1 };
+const listAuditLogsWithFilter = async (filter, query, format = publicAudit, idSortOrder = 1) => {
+  const sort = { [query.sortBy]: query.sortOrder === 'asc' ? 1 : -1, _id: idSortOrder };
   const [items, total] = await Promise.all([
     populateAudit(AuditLog.find(filter).sort(sort).skip((query.page - 1) * query.limit).limit(query.limit).lean()),
     AuditLog.countDocuments(filter),
   ]);
   return {
-    items: items.map(publicAudit),
+    items: items.map(format),
     pagination: { page: query.page, limit: query.limit, total, totalPages: total ? Math.ceil(total / query.limit) : 0 },
   };
+};
+
+const platformDescription = (log) => {
+  const targetName = typeof log.changes?.name === 'string'
+    ? log.changes.name
+    : log.changes?.name?.to;
+  return `${log.action.replaceAll('_', ' ')} — ${targetName || log.resourceType}`;
+};
+
+export const listAuditLogs = async ({ auth, access, query }) => {
+  const filter = buildFilter({ auth, access, query });
+  return listAuditLogsWithFilter(filter, query);
+};
+
+export const listSuperAdminAuditLogs = async ({ auth, query }) => {
+  const legacyActorIds = await User.find({ platformRole: 'SUPER_ADMIN' }).distinct('_id');
+  const filter = buildFilter({ auth, access: null, query });
+  filter.$and = [
+    ...(filter.$and || []),
+    {
+      $or: [
+        { actorPlatformRole: 'SUPER_ADMIN' },
+        { actorPlatformRole: { $exists: false }, actorId: { $in: legacyActorIds } },
+      ],
+    },
+    { $or: PLATFORM_AUDIT_EVENTS },
+  ];
+  return listAuditLogsWithFilter(
+    filter,
+    query,
+    (log) => ({ ...publicAudit(log), description: platformDescription(log) }),
+    -1,
+  );
 };
 
 export const getAuditLog = async ({ auth, access, auditLogId }) => {
@@ -146,4 +201,4 @@ export const exportAuditLogs = async ({ auth, access, query }) => {
   return rows.map((row) => row.map(escape).join(',')).join('\r\n');
 };
 
-export default { listAuditLogs, getAuditLog, getAuditStatistics, exportAuditLogs };
+export default { listAuditLogs, listSuperAdminAuditLogs, getAuditLog, getAuditStatistics, exportAuditLogs };

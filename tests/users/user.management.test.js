@@ -119,6 +119,283 @@ describe('User management', () => {
     sendWithResendMock.mockResolvedValue({ id: 'mock-email-id' });
   });
 
+  it('limits Department Member user access to their department and organization-level roles', async () => {
+    const { organizationId, platformAdmin } =
+      await createOrganizationContext('member-user-visibility');
+    const ownDepartment = await Department.create({
+      organizationId,
+      name: 'Member Own Department',
+      status: 'ACTIVE',
+    });
+    const otherDepartment = await Department.create({
+      organizationId,
+      name: 'Member Other Department',
+      status: 'ACTIVE',
+    });
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+    const organizationAdminRole = await Role.findOne({
+      organizationId,
+      name: ORGANIZATION_ADMIN_ROLE_NAME,
+    });
+    const departmentManagerRole = await Role.findOne({
+      organizationId,
+      roleType: 'DEPARTMENT_MANAGER',
+    });
+    const organizationCustomRole = await Role.create({
+      organizationId,
+      name: 'Organization Scope Custom Role',
+      roleType: 'CUSTOM',
+      assignmentScopes: ['ORGANIZATION'],
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    });
+    const departmentCustomRole = await Role.create({
+      organizationId,
+      name: 'Other Department Custom Role',
+      roleType: 'CUSTOM',
+      assignmentScopes: ['DEPARTMENT'],
+      permissions: ['users.view'],
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    });
+
+    const createScopedUser = async ({ name, email, departmentId }) =>
+      createUser({
+        name,
+        email,
+        organizationMemberships: [{ organizationId, departmentId, status: 'ACTIVE' }],
+      });
+    const assignRole = (userId, roleId, scopeType, departmentId = null) =>
+      UserRoleAssignment.create({
+        userId,
+        roleId,
+        organizationId,
+        scopeType,
+        departmentId,
+        status: 'ACTIVE',
+        assignedBy: platformAdmin._id,
+      });
+
+    const member = await createScopedUser({
+      name: 'Department Member Actor',
+      email: 'member-user-visibility-actor@example.com',
+      departmentId: ownDepartment._id,
+    });
+    await assignRole(member._id, memberRole._id, 'DEPARTMENT', ownDepartment._id);
+    const ownPeer = await createScopedUser({
+      name: 'Own Department Peer',
+      email: 'member-user-visibility-peer@example.com',
+      departmentId: ownDepartment._id,
+    });
+    await assignRole(ownPeer._id, memberRole._id, 'DEPARTMENT', ownDepartment._id);
+    const otherMember = await createScopedUser({
+      name: 'Other Department Member',
+      email: 'member-user-visibility-other-member@example.com',
+      departmentId: otherDepartment._id,
+    });
+    await assignRole(otherMember._id, memberRole._id, 'DEPARTMENT', otherDepartment._id);
+    const organizationAdmin = await createScopedUser({
+      name: 'Organization Admin User',
+      email: 'member-user-visibility-admin@example.com',
+      departmentId: null,
+    });
+    await assignRole(organizationAdmin._id, organizationAdminRole._id, 'ORGANIZATION');
+    const organizationCustomUser = await createScopedUser({
+      name: 'Organization Custom User',
+      email: 'member-user-visibility-org-custom@example.com',
+      departmentId: otherDepartment._id,
+    });
+    await assignRole(organizationCustomUser._id, organizationCustomRole._id, 'ORGANIZATION');
+    const otherDepartmentManager = await createScopedUser({
+      name: 'Other Department Manager',
+      email: 'member-user-visibility-manager@example.com',
+      departmentId: otherDepartment._id,
+    });
+    await assignRole(
+      otherDepartmentManager._id,
+      departmentManagerRole._id,
+      'DEPARTMENT',
+      otherDepartment._id
+    );
+    const otherDepartmentCustomUser = await createScopedUser({
+      name: 'Other Department Custom User',
+      email: 'member-user-visibility-dept-custom@example.com',
+      departmentId: otherDepartment._id,
+    });
+    await assignRole(
+      otherDepartmentCustomUser._id,
+      departmentCustomRole._id,
+      'DEPARTMENT',
+      otherDepartment._id
+    );
+    const superAdmin = await createSuperAdmin({
+      name: 'Platform Super Admin',
+      email: 'member-user-visibility-super-admin@example.com',
+      organizationMemberships: [
+        { organizationId, departmentId: ownDepartment._id, status: 'ACTIVE' },
+      ],
+    });
+    await assignRole(superAdmin._id, memberRole._id, 'DEPARTMENT', ownDepartment._id);
+
+    const login = await loginRequest({
+      email: member.email,
+      password: TEST_PASSWORD,
+      organizationId,
+    });
+    const response = await request(app)
+      .get('/api/users')
+      .query({ page: 1, limit: 100 })
+      .set(authHeader(login.body.data.accessToken));
+
+    expect(response.status).toBe(200);
+    const visibleNames = response.body.data.users.map(({ name }) => name);
+    expect(visibleNames).toEqual(
+      expect.arrayContaining([
+        'Department Member Actor',
+        'Own Department Peer',
+        'Organization Admin User',
+        'Organization Custom User',
+      ])
+    );
+    expect(visibleNames).not.toEqual(
+      expect.arrayContaining([
+        'Other Department Member',
+        'Other Department Manager',
+        'Other Department Custom User',
+        'Platform Super Admin',
+      ])
+    );
+    const roleOptions = response.body.data.roleOptions.map(({ name }) => name);
+    expect(roleOptions).toEqual(
+      expect.arrayContaining([
+        memberRole.name,
+        organizationAdminRole.name,
+        organizationCustomRole.name,
+      ])
+    );
+    expect(roleOptions).not.toEqual(
+      expect.arrayContaining([departmentManagerRole.name, departmentCustomRole.name])
+    );
+    expect(
+      response.body.data.users
+        .find(({ id }) => id === String(ownPeer._id))
+        .roleAssignments.map(({ roleName }) => roleName)
+    ).toEqual([memberRole.name]);
+
+    const roleFilteredResponse = await request(app)
+      .get('/api/users')
+      .query({ page: 1, limit: 100, roleId: String(organizationCustomRole._id) })
+      .set(authHeader(login.body.data.accessToken));
+    expect(roleFilteredResponse.status).toBe(200);
+    expect(roleFilteredResponse.body.data.users.map(({ name }) => name)).toEqual([
+      'Organization Custom User',
+    ]);
+
+    const detailsResponse = await request(app)
+      .get(`/api/users/${ownPeer._id}`)
+      .set(authHeader(login.body.data.accessToken));
+    expect(detailsResponse.status).toBe(404);
+  });
+
+  it('uses custom-role user access when a Department Member also has an organization-scoped custom role', async () => {
+    const { organizationId, platformAdmin } =
+      await createOrganizationContext('member-custom-role-access');
+    const ownDepartment = await Department.create({
+      organizationId,
+      name: 'Combined Role Own Department',
+      status: 'ACTIVE',
+    });
+    const otherDepartment = await Department.create({
+      organizationId,
+      name: 'Combined Role Other Department',
+      status: 'ACTIVE',
+    });
+    const memberRole = await Role.findOne({ organizationId, roleType: 'EMPLOYEE' });
+    const organizationCustomRole = await Role.create({
+      organizationId,
+      name: 'Organization Scope Custom Role',
+      roleType: 'CUSTOM',
+      assignmentScopes: ['ORGANIZATION'],
+      permissions: ['users.view', 'requests.create'],
+      status: 'ACTIVE',
+      createdBy: platformAdmin._id,
+    });
+    const member = await createUser({
+      name: 'Department Member with Custom Role',
+      email: 'member-custom-role-actor@example.com',
+      organizationMemberships: [
+        { organizationId, departmentId: ownDepartment._id, status: 'ACTIVE' },
+      ],
+    });
+    const otherDepartmentUser = await createUser({
+      name: 'Custom Role Visible User',
+      email: 'member-custom-role-visible@example.com',
+      organizationMemberships: [
+        { organizationId, departmentId: otherDepartment._id, status: 'ACTIVE' },
+      ],
+    });
+    await UserRoleAssignment.create([
+      {
+        userId: member._id,
+        roleId: memberRole._id,
+        organizationId,
+        scopeType: 'DEPARTMENT',
+        departmentId: ownDepartment._id,
+        status: 'ACTIVE',
+        assignedBy: platformAdmin._id,
+      },
+      {
+        userId: member._id,
+        roleId: organizationCustomRole._id,
+        organizationId,
+        scopeType: 'ORGANIZATION',
+        departmentId: null,
+        status: 'ACTIVE',
+        assignedBy: platformAdmin._id,
+      },
+    ]);
+
+    const login = await loginRequest({
+      email: member.email,
+      password: TEST_PASSWORD,
+      organizationId,
+    });
+    const profileResponse = await request(app)
+      .get('/api/auth/me')
+      .set(authHeader(login.body.data.accessToken));
+
+    expect(profileResponse.status).toBe(200);
+    expect(profileResponse.body.data.user.authorization.rolePermissions).toEqual([
+      {
+        roleName: memberRole.name,
+        roleType: 'EMPLOYEE',
+        scopeType: 'DEPARTMENT',
+        permissions: [...DEPARTMENT_MEMBER_PERMISSIONS].sort(),
+      },
+      {
+        roleName: organizationCustomRole.name,
+        roleType: 'CUSTOM',
+        scopeType: 'ORGANIZATION',
+        permissions: ['requests.create', 'users.view'],
+      },
+    ]);
+
+    const listResponse = await request(app)
+      .get('/api/users')
+      .query({ page: 1, limit: 100 })
+      .set(authHeader(login.body.data.accessToken));
+    expect(listResponse.status).toBe(200);
+    expect(listResponse.body.data.users.map(({ id }) => id)).toContain(
+      String(otherDepartmentUser._id),
+    );
+
+    const detailsResponse = await request(app)
+      .get(`/api/users/${otherDepartmentUser._id}`)
+      .set(authHeader(login.body.data.accessToken));
+    expect(detailsResponse.status).toBe(200);
+  });
+
   afterAll(async () => {
     await disconnectTestDatabase();
   });
@@ -1464,6 +1741,16 @@ describe('User management', () => {
     const target = await createActiveUser({ organizationId, email: 'password-target@example.com' });
     const oldLogin = await loginRequest({ email: target.email, password: TEST_PASSWORD });
     expect(oldLogin.status).toBe(200);
+
+    const directPasswordChange = await request(app)
+      .post('/api/settings/security/password')
+      .set(authHeader(oldLogin.body.data.accessToken))
+      .send({
+        currentPassword: TEST_PASSWORD,
+        password: 'NewStrongPassword123!',
+        confirmPassword: 'NewStrongPassword123!',
+      });
+    expect(directPasswordChange.status).toBe(404);
 
     const forgot = await request(app).post('/api/auth/forgot-password').send({ email: target.email });
     expect(forgot.status).toBe(200);

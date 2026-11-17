@@ -90,7 +90,7 @@ const processOrganization = async (organization) => {
               }], { session });
             }
           }
-          if (definition.roleType === 'EMPLOYEE') {
+          if (['EMPLOYEE', 'DEPARTMENT_MANAGER', 'ORGANIZATION_ADMIN'].includes(definition.roleType)) {
             const missingPermissions = definition.permissions.filter(
               (permission) => !role.permissions.includes(permission)
             );

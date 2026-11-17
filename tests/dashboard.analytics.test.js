@@ -524,11 +524,57 @@ describe('Dashboard analytics providers', () => {
       slaStartedAt,
       slaDueAt: new Date(decisionAt.getTime() + 30 * 60_000),
     });
+    const delegator = await createUser({
+      name: 'Delegated analytics approver',
+      email: `dashboard-analytics-delegated-${++sequence}@example.com`,
+      organizationMemberships: [{
+        organizationId: context.organizationId,
+        departmentId: context.departmentId,
+        status: 'ACTIVE',
+      }],
+    });
+    await User.updateOne({ _id: delegator._id }, {
+      $set: {
+        approvalDelegations: [{
+          organizationId: context.organizationId,
+          delegateId: context.user._id,
+          scopeType: 'DEPARTMENT',
+          departmentId: context.departmentId,
+          stageIds: ['manager-stage'],
+          startsAt: new Date(decisionAt.getTime() - 10 * 60_000),
+          endsAt: new Date(decisionAt.getTime() - 60_000),
+          status: 'ACTIVE',
+        }],
+      },
+    });
+    const delegatedRequest = await createRequest({
+      organizationId: context.organizationId,
+      requesterId: requester._id,
+      departmentId: context.departmentId,
+      status: 'APPROVED',
+    });
+    await createStep({
+      organizationId: context.organizationId,
+      requestId: delegatedRequest._id,
+      approverId: delegator._id,
+      roleId: context.role._id,
+      status: 'APPROVED',
+      assignmentResolution: 'DIRECT',
+      decidedBy: context.user._id,
+      decisionAt: new Date(decisionAt.getTime() - 2 * 60_000),
+      actedOnBehalfOf: delegator._id,
+    });
 
     const response = await getAnalytics(context.token, 'approval-analytics');
     expect(response.status).toBe(200);
+    expect(response.body.data.decisions).toEqual([
+      { decision: 'APPROVED', count: 2 },
+      { decision: 'REJECTED', count: 0 },
+      { decision: 'RETURNED', count: 0 },
+    ]);
     expect(response.body.data.performance).toEqual(expect.objectContaining({
-      completedDecisions: 1,
+      completedDecisions: 2,
+      delegatedDecisions: 1,
       averageDecisionMinutes: 30,
       medianDecisionMinutes: 30,
       slaDecisionSampleSize: 1,

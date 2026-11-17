@@ -5,6 +5,7 @@ import WorkflowDefinition from '../../models/WorkflowDefinition.js';
 import Organization from '../../models/Organization.js';
 import Department from '../../models/Department.js';
 import User from '../../models/User.js';
+import Role from '../../models/Role.js';
 import AuditLog from '../../models/AuditLog.js';
 import ApprovalStep from '../../models/ApprovalStep.js';
 import { hasEffectivePermission } from '../../services/authorization/permission.service.js';
@@ -68,11 +69,16 @@ const getActiveRequester = async ({ userId, organizationId, session }) => {
   return user;
 };
 
-const getDepartmentForRequester = async ({ departmentId, organizationId, userId, session }) => {
+const getActiveDepartment = async ({ departmentId, organizationId, session }) => {
   let query = Department.findOne({ _id: departmentId, organizationId, status: 'ACTIVE' });
   if (session) query = query.session(session);
   const department = await query;
   if (!department) throw new AppError('Department not found or inactive.', 404, 'DEPARTMENT_NOT_FOUND');
+  return department;
+};
+
+const getDepartmentForRequester = async ({ departmentId, organizationId, userId, session }) => {
+  const department = await getActiveDepartment({ departmentId, organizationId, session });
   let userQuery = User.findOne({
     _id: userId,
     organizationMemberships: { $elemMatch: { organizationId, departmentId, status: 'ACTIVE' } },
@@ -274,7 +280,7 @@ export const resolveRequestVisibility = async ({ organizationId, actorId, access
     relevantSteps
       .filter((step) => {
         const departmentId = relevantDepartmentByRequest.get(String(step.requestId));
-        if (!departmentId || isPersonalHistoryOnly ||
+        if (isPersonalHistoryOnly ||
             !hasEffectivePermission(access, 'requests.approve', departmentId)) return false;
         const delegatedAssignment = isDelegatedForStep(requestVisibility, step, departmentId);
         const delegatedAction = step.actedOnBehalfOf &&
@@ -446,7 +452,9 @@ const enrichRequestSummaries = async ({ items, organizationId, actorId, requestV
   if (!items.length) return [];
   const requestIds = items.map((item) => item._id);
   const userIds = [...new Set(items.map((item) => String(item.requesterId)))];
-  const departmentIds = [...new Set(items.map((item) => String(item.departmentId)))];
+  const departmentIds = [
+    ...new Set(items.flatMap((item) => (item.departmentId ? [String(item.departmentId)] : []))),
+  ];
   const [users, departments, steps] = await Promise.all([
     User.find({ _id: { $in: userIds }, organizationMemberships: { $elemMatch: { organizationId } } })
       .select('name email').lean(),
@@ -626,16 +634,20 @@ export const createRequest = async ({ organizationId, actorId, access, input }) 
       return await withTransaction(async (session) => {
         await assertActiveOrganization(organizationId, session);
         const requester = await getActiveRequester({ userId: actorId, organizationId, session });
-        const departmentId =
-          input.departmentId ||
-          requester.organizationMemberships.find(
+        const membershipDepartmentId = requester.organizationMemberships.find(
             (membership) => String(membership.organizationId) === String(organizationId) && membership.status === 'ACTIVE',
           )?.departmentId;
-        if (!departmentId) {
-          throw new AppError('An active department membership is required to create a request.', 403, 'DEPARTMENT_MEMBERSHIP_REQUIRED');
-        }
+        const departmentId = input.departmentId ||
+          (access.organizationPermissions.has('requests.create') ? null : membershipDepartmentId) ||
+          null;
         assertPermissionForDepartment(access, 'requests.create', departmentId);
-        await getDepartmentForRequester({ departmentId, organizationId, userId: actorId, session });
+        if (departmentId) {
+          if (access.organizationPermissions.has('requests.create')) {
+            await getActiveDepartment({ departmentId, organizationId, session });
+          } else {
+            await getDepartmentForRequester({ departmentId, organizationId, userId: actorId, session });
+          }
+        }
         const definition = await getRequestType({ requestTypeId: input.requestTypeId, organizationId, session, activeOnly: true });
         validateDetails(input.details, definition);
         const amountField = getAmountField(definition);
@@ -775,9 +787,16 @@ export const updateRequest = async ({ organizationId, actorId, access, requestId
         !(access.scopedPermissions.get('requests.edit_own_draft')?.has(String(request.departmentId)))) {
       throw new AppError('Permission requests.edit_own_draft is required for this operation.', 403, 'FORBIDDEN');
     }
-    const nextDepartmentId = input.departmentId || String(request.departmentId);
+    const nextDepartmentId = input.departmentId ?? request.departmentId;
     await getActiveRequester({ userId: actorId, organizationId, session });
-    await getDepartmentForRequester({ departmentId: nextDepartmentId, organizationId, userId: actorId, session });
+    if (nextDepartmentId) {
+      await getDepartmentForRequester({
+        departmentId: nextDepartmentId,
+        organizationId,
+        userId: actorId,
+        session,
+      });
+    }
     const definition = await getRequestType({ requestTypeId: request.requestTypeId, organizationId, session, activeOnly: true });
     const mergedDetails = input.details === undefined
       ? request.details
@@ -807,14 +826,20 @@ export const submitRequest = async ({ organizationId, actorId, access, requestId
     return await withTransaction(async (session) => {
     const request = await getRequest({ organizationId, requestId, session });
     assertOwnRequest(request, actorId);
-    if (!access.organizationPermissions.has('requests.submit') &&
-        !(access.scopedPermissions.get('requests.submit')?.has(String(request.departmentId)))) {
+    if (!hasEffectivePermission(access, 'requests.submit', request.departmentId)) {
       throw new AppError('Permission requests.submit is required for this operation.', 403, 'FORBIDDEN');
     }
     if (request.status !== 'DRAFT') throw new AppError('Only draft requests can be submitted.', 409, 'INVALID_REQUEST_STATUS');
     await assertActiveOrganization(organizationId, session);
     await getActiveRequester({ userId: actorId, organizationId, session });
-    await getDepartmentForRequester({ departmentId: request.departmentId, organizationId, userId: actorId, session });
+    if (request.departmentId) {
+      await getDepartmentForRequester({
+        departmentId: request.departmentId,
+        organizationId,
+        userId: actorId,
+        session,
+      });
+    }
     const definition = await getRequestType({ requestTypeId: request.requestTypeId, organizationId, session, activeOnly: true });
     validateDetails(request.details, definition);
     const amountField = getAmountField(definition);
@@ -846,7 +871,14 @@ export const resubmitRequest = async ({ organizationId, actorId, access, request
     }
     await assertActiveOrganization(organizationId, session);
     await getActiveRequester({ userId: actorId, organizationId, session });
-    await getDepartmentForRequester({ departmentId: request.departmentId, organizationId, userId: actorId, session });
+    if (request.departmentId) {
+      await getDepartmentForRequester({
+        departmentId: request.departmentId,
+        organizationId,
+        userId: actorId,
+        session,
+      });
+    }
     const definition = await getRequestType({
       requestTypeId: request.requestTypeId,
       organizationId,
@@ -908,10 +940,29 @@ export const getApprovalProgress = async ({ organizationId, actorId, access, req
   const request = await requestForTracking({ organizationId, actorId, access, requestId });
   const steps = await ApprovalStep.find({ organizationId, requestId })
     .sort({ attemptNumber: -1, sequence: 1, createdAt: 1 })
+    .populate({ path: 'roleId', select: 'name' })
+    .populate({ path: 'approverId', select: 'name' })
     .lean();
   const currentAttempt = steps[0]?.attemptNumber || 0;
   const current = steps.filter((step) => step.attemptNumber === currentAttempt);
   const sequences = [...new Set(current.map((step) => step.sequence))].sort((a, b) => a - b);
+  const workflow = steps[0]
+    ? await WorkflowDefinition.findOne({
+        _id: steps[0].workflowDefinitionId,
+        organizationId,
+        version: steps[0].workflowVersion,
+      })
+        .select('stages')
+        .lean()
+    : null;
+  const workflowStages = workflow?.stages || [];
+  const stageRoleIds = workflowStages
+    .map((stage) => stage.roleId || stage.assignment?.roleId)
+    .filter(Boolean);
+  const roleNames = stageRoleIds.length
+    ? await Role.find({ _id: { $in: stageRoleIds }, organizationId }).select('name').lean()
+    : [];
+  const roleNameById = new Map(roleNames.map((role) => [String(role._id), role.name]));
   const completed = sequences.filter((sequence) => current.filter((step) => step.sequence === sequence)
     .every((step) => ['APPROVED', 'SKIPPED', 'CANCELLED'].includes(step.status)));
   const pending = sequences.filter((sequence) => current.some((step) => ['PENDING', 'ACTIVE', 'CLAIMED'].includes(step.status)));
@@ -921,6 +972,46 @@ export const getApprovalProgress = async ({ organizationId, actorId, access, req
     stageName: step.stageName,
   }));
   const active = current.find((step) => ['ACTIVE', 'CLAIMED'].includes(step.status));
+  const stages = sequences.map((sequence) => {
+    const stageSteps = current.filter((step) => step.sequence === sequence);
+    const representative =
+      stageSteps.find((step) => ['ACTIVE', 'CLAIMED', 'PENDING'].includes(step.status)) ||
+      stageSteps[0];
+    const workflowStage = workflowStages.find(
+      (stage) => stage.sequence === sequence && stage.stageId === representative.stageId
+    );
+    const roleId =
+      representative.roleId?._id ||
+      representative.roleId ||
+      workflowStage?.roleId ||
+      workflowStage?.assignment?.roleId;
+    const activeStep = stageSteps.find((step) => ['ACTIVE', 'CLAIMED'].includes(step.status));
+    const status = activeStep?.status ||
+      (stageSteps.some((step) => step.status === 'PENDING')
+        ? 'PENDING'
+        : stageSteps.find((step) => ['REJECTED', 'RETURNED'].includes(step.status))?.status ||
+          (stageSteps.every((step) => step.status === 'SKIPPED')
+            ? 'SKIPPED'
+            : stageSteps.some((step) => step.status === 'APPROVED')
+              ? 'APPROVED'
+              : 'CANCELLED'));
+
+    return {
+      sequence,
+      stageId: representative.stageId,
+      stageName: representative.stageName,
+      description: workflowStage?.description || '',
+      status,
+      approverType: representative.approverType,
+      approverRoleName:
+        representative.roleId?.name || roleNameById.get(String(roleId)) || null,
+      approverNames: [...new Set(stageSteps.map((step) => step.approverId?.name).filter(Boolean))],
+      approvalMode: representative.approvalMode,
+      scopeType: representative.scopeType || null,
+      slaDueAt: representative.slaDueAt || null,
+      comments: [...new Set(stageSteps.map((step) => step.comments?.trim()).filter(Boolean))],
+    };
+  });
   return {
     request: toPublicRequest(request),
     attemptNumber: currentAttempt,
@@ -934,6 +1025,7 @@ export const getApprovalProgress = async ({ organizationId, actorId, access, req
     completedStages: completed,
     pendingStages: pending,
     skippedStages: skipped,
+    stages,
     submittedAt: request.submittedAt,
     updatedAt: request.updatedAt,
   };

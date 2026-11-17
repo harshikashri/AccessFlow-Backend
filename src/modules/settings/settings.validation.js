@@ -1,6 +1,5 @@
 import { AppError } from '../../utils/AppError.js';
 import mongoose from 'mongoose';
-import { validatePasswordStrength } from '../../utils/password.js';
 
 const objectBody = (body) => {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -45,15 +44,6 @@ export const validateNotificationPreferencesUpdate = (body) => {
   if (Object.keys(body).some((key) => !booleanFields.includes(key))) throw new AppError('Unsupported notification preference.', 400, 'VALIDATION_ERROR');
   if (Object.values(body).some((value) => typeof value !== 'boolean')) throw new AppError('Notification preferences must be boolean.', 400, 'VALIDATION_ERROR');
   return body;
-};
-
-export const validatePasswordChange = (body) => {
-  objectBody(body);
-  if (Object.keys(body).some((key) => !['currentPassword', 'password', 'confirmPassword'].includes(key))) throw new AppError('Unsupported password field.', 400, 'VALIDATION_ERROR');
-  if (body.password !== body.confirmPassword) throw new AppError('Password and confirmation do not match.', 400, 'VALIDATION_ERROR');
-  validatePasswordStrength(body.password);
-  if (typeof body.currentPassword !== 'string' || !body.currentPassword) throw new AppError('Current password is required.', 400, 'VALIDATION_ERROR');
-  return { currentPassword: body.currentPassword, password: body.password };
 };
 
 export const validateSessionId = (value) => {
